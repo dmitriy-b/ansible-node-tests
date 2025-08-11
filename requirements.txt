@@ -1,0 +1,32 @@
+# Core Ansible packages
+ansible>=6.0.0,<8.0.0
+ansible-core>=2.13.0,<2.16.0
+
+# HTTP requests and API interactions
+requests>=2.25.0
+urllib3>=1.26.0
+
+# JSON/YAML processing
+PyYAML>=6.0.2
+jmespath>=0.10.0
+
+# Additional utilities
+python-dateutil>=2.8.0
+packaging>=20.0
+
+# Optional: Enhanced output and debugging
+colorama>=0.4.4
+tabulate>=0.9.0
+
+# Optional: Performance improvements
+paramiko>=2.7.0
+cryptography>=3.4.0
+
+# Docker support for local deployment (Ansible docker modules)
+# Note: docker module will be installed separately if needed
+# docker>=6.0.0
+
+# Development and testing (optional)
+# pytest>=6.0.0
+# pytest-ansible>=3.0.0
+# ansible-lint>=6.0.0 

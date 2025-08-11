@@ -1,0 +1,360 @@
+---
+# Local deployment configuration
+# ==============================
+
+# Docker images (we'll pull these from public registries)
+docker_images:
+  # Execution Layer clients
+  nethermind:
+    image: "nethermind/nethermind"
+    tag: "latest"
+  geth:
+    image: "ethereum/client-go"
+    tag: "latest" 
+  besu:
+    image: "hyperledger/besu"
+    tag: "latest"
+  erigon:
+    image: "thorax/erigon"
+    tag: "latest"
+    
+  # Consensus Layer clients  
+  lighthouse:
+    image: "sigp/lighthouse"
+    tag: "latest"
+  prysm:
+    image: "gcr.io/prysmaticlabs/prysm/beacon-chain"
+    tag: "latest"
+  teku:
+    image: "consensys/teku"
+    tag: "latest"
+  nimbus:
+    image: "statusim/nimbus-eth2"
+    tag: "latest"
+  lodestar:
+    image: "chainsafe/lodestar"
+    tag: "latest"
+
+# Network configurations (expanded based on the workflow)
+network_configs:
+  # Ethereum Mainnet and Testnets
+  mainnet:
+    chain_id: 1
+    network_type: "ethereum"
+    el_bootnodes: []
+    cl_bootnodes: []
+    genesis_validators_root: "0x4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95"
+    
+  sepolia:
+    chain_id: 11155111
+    network_type: "ethereum"
+    el_bootnodes: []
+    cl_bootnodes: []
+    genesis_validators_root: "0xd8ea171f3c94aea21ebc42a1ed61052acf3f9209c00e4efbaaddac09ed9b8078"
+    
+  holesky:
+    chain_id: 17000
+    network_type: "ethereum"
+    el_bootnodes: []
+    cl_bootnodes: []
+    genesis_validators_root: "0x9143aa7c615a7f7115e2b6aac319c03529df8242ae705fba9df39b79c59fa8b1"
+    
+  # Gnosis Chain
+  gnosis:
+    chain_id: 100
+    network_type: "gnosis"
+    el_bootnodes: []
+    cl_bootnodes: []
+    genesis_validators_root: "0xf5dcb5564e829aab27264b9becd5dfaa017085611224cb3036c2506392b6a6cf"
+    
+  chiado:
+    chain_id: 10200
+    network_type: "gnosis"
+    el_bootnodes: []
+    cl_bootnodes: []
+    genesis_validators_root: "0xada1c5d8fb8ff80abd3ab9d4e0ce35645b4d5ad0a8db6d2ce0e68f13ba13a3b7"
+    checkpoint_sync_url: "https://checkpoint.chiadochain.net"
+    
+  # Optimism Stack (L2)
+  op-mainnet:
+    chain_id: 10
+    network_type: "optimism"
+    l1_chain_id: 1
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  op-sepolia:
+    chain_id: 11155420
+    network_type: "optimism"
+    l1_chain_id: 11155111
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  # Base (L2)
+  base-mainnet:
+    chain_id: 8453
+    network_type: "base"
+    l1_chain_id: 1
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  base-sepolia:
+    chain_id: 84532
+    network_type: "base"
+    l1_chain_id: 11155111
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  # Linea
+  linea-mainnet:
+    chain_id: 59144
+    network_type: "linea"
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  linea-sepolia:
+    chain_id: 59141
+    network_type: "linea"
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  # Taiko
+  taiko-alethia:
+    chain_id: 167000
+    network_type: "taiko"
+    l1_chain_id: 1
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  taiko-hekla:
+    chain_id: 167009
+    network_type: "taiko"
+    l1_chain_id: 11155111
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  # Energy Web Chain
+  energyweb:
+    chain_id: 246
+    network_type: "energyweb"
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  volta:
+    chain_id: 73799
+    network_type: "energyweb"
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  # Additional Networks (commonly used ones)
+  hoodi:
+    chain_id: 12009
+    network_type: "hoodi"
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  joc-mainnet:
+    chain_id: 99
+    network_type: "joc"
+    el_bootnodes: []
+    cl_bootnodes: []
+    
+  joc-testnet:
+    chain_id: 999
+    network_type: "joc"
+    el_bootnodes: []
+    cl_bootnodes: []
+
+# Port configurations (to avoid conflicts)
+default_ports:
+  # Execution Layer
+  el_rpc_port: 8545
+  el_ws_port: 8546  
+  el_auth_port: 8551
+  el_p2p_port: 30303
+  el_metrics_port: 9545
+  
+  # Consensus Layer
+  cl_api_port: 5052
+  cl_p2p_port: 9000
+  cl_metrics_port: 5054
+
+# Local directories structure
+local_directories:
+  base: "{{ playbook_dir }}/local-deployment"
+  data: "{{ playbook_dir }}/local-deployment/data"
+  logs: "{{ playbook_dir }}/local-deployment/logs" 
+  config: "{{ playbook_dir }}/local-deployment/config"
+  keys: "{{ playbook_dir }}/local-deployment/keys"
+  jwts: "{{ playbook_dir }}/local-deployment/jwts"
+
+# Default resource limits
+resource_limits:
+  memory: "4g"
+  cpus: "2"
+  
+# Health check settings
+health_check:
+  timeout: 300  # seconds
+  retry_delay: 10  # seconds
+  max_retries: 30
+
+# JWT secret for EL-CL communication
+jwt_secret: "0x$(openssl rand -hex 32)"
+
+# Logging configuration
+logging:
+  level: "info"
+  format: "json"
+  max_size: "100M"
+  max_files: 3
+
+# Container restart policy
+restart_policy: "unless-stopped"
+
+# Predefined configuration files (matching the workflow)
+predefined_configs:
+  "default.json":
+    sync_mode: "fast"
+    pruning_enabled: true
+    archive_mode: false
+    description: "Default sync configuration with pruning enabled"
+    
+  "fastSync.json":
+    sync_mode: "fast"
+    pruning_enabled: true
+    archive_mode: false
+    description: "Fast sync with aggressive pruning"
+    
+  "fullSync.json":
+    sync_mode: "full"
+    pruning_enabled: false
+    archive_mode: true
+    description: "Full sync preserving all historical data"
+    
+  "archiveSync.json":
+    sync_mode: "archive"
+    pruning_enabled: false
+    archive_mode: true
+    description: "Archive node configuration"
+    
+  "fuzzer.json":
+    sync_mode: "fast"
+    pruning_enabled: true
+    archive_mode: false
+    description: "Configuration optimized for fuzzing tests"
+
+# EL Client command templates
+el_client_commands:
+  nethermind:
+    base_cmd: "--config={{ network }}"
+    additional_flags:
+      - "--datadir /data"
+      - "--log Debug"
+      - "--JsonRpc.Enabled true"
+      - "--JsonRpc.Host 0.0.0.0"
+      - "--JsonRpc.Port {{ default_ports.el_rpc_port }}"
+      - "--JsonRpc.WebSocketsPort {{ default_ports.el_ws_port }}"
+      - "--JsonRpc.EngineHost 0.0.0.0"
+      - "--JsonRpc.EnginePort {{ default_ports.el_auth_port }}"
+      - "--Network.P2PPort {{ default_ports.el_p2p_port }}"
+      - "--JsonRpc.JwtSecretFile /jwt.secret"
+      - "--Network.DiscoveryPort {{ default_ports.el_p2p_port }}"
+      - "--HealthChecks.Enabled true"
+      - "--Metrics.Enabled true"
+      - "--Metrics.ExposePort {{ default_ports.el_metrics_port }}"
+    archive_flags:
+      - "--Sync.FastSync false"
+      - "--Sync.PivotNumber 0"
+    fast_sync_flags:
+      - "--Sync.FastSync true"
+      - "--Sync.SnapSync true"
+      
+  geth:
+    base_cmd: "--{{ network }}"
+    additional_flags:
+      - "--datadir /data"
+      - "--http"
+      - "--http.addr 0.0.0.0"
+      - "--http.port {{ default_ports.el_rpc_port }}"
+      - "--ws"
+      - "--ws.addr 0.0.0.0"
+      - "--ws.port {{ default_ports.el_ws_port }}"
+      - "--authrpc.addr 0.0.0.0"
+      - "--authrpc.port {{ default_ports.el_auth_port }}"
+      - "--authrpc.jwtsecret /jwt.secret"
+      - "--port {{ default_ports.el_p2p_port }}"
+    archive_flags:
+      - "--syncmode full"
+      - "--gcmode archive"
+    fast_sync_flags:
+      - "--syncmode snap"
+
+# CL Client command templates  
+cl_client_commands:
+  lighthouse:
+    base_cmd: "lighthouse bn"
+    additional_flags:
+      - "--disable-upnp"
+      - "--datadir /data"
+      - "--port {{ default_ports.cl_p2p_port }}"
+      - "--http"
+      - "--http-address 0.0.0.0"
+      - "--http-port {{ default_ports.cl_api_port }}"
+      - "--execution-endpoints http://{{ el_container_name }}:{{ default_ports.el_auth_port }}"
+      - "--execution-jwt /jwt.secret"
+      - "--eth1"
+      - "--validator-monitor-auto"
+      - "--subscribe-all-subnets"
+      - "--import-all-attestations"
+      - "{% if current_network_config.checkpoint_sync_url is defined %}--checkpoint-sync-url {{ current_network_config.checkpoint_sync_url }}{% endif %}"
+      - "{% if network == 'chiado' %}--boot-nodes=enr:-Ly4QAtr21x5Ps7HYhdZkIBRBgcBkvlIfEel1YNjtFWf4cV3au2LgBGICz9PtEs9-p2HUl_eME8m1WImxTxSB3AkCMwBh2F0dG5ldHOIAAAAAAAAAACEZXRoMpAxNnBDAgAAb___________gmlkgnY0gmlwhANHhOeJc2VjcDI1NmsxoQNLp1QPV8-pyMCohOtj6xGtSBM_GtVTqzlbvNsCF4ezkYhzeW5jbmV0cwCDdGNwgiMog3VkcIIjKA,enr:-Ly4QLgn8Bx6faigkKUGZQvd1HDToV2FAxZIiENK-lczruzQb90qJK-4E65ADly0s4__dQOW7IkLMW7ZAyJy2vtiLy8Bh2F0dG5ldHOIAAAAAAAAAACEZXRoMpAxNnBDAgAAb___________gmlkgnY0gmlwhANFIw2Jc2VjcDI1NmsxoQMa-fWEy9UJHfOl_lix3wdY5qust78sHAqZnWwEiyqKgYhzeW5jbmV0cwCDdGNwgiMog3VkcIIjKA{% endif %}"
+      - "--network {{ network }}"
+    validator_flags:
+      - "--validator"
+    non_validator_flags:
+      - "--disable-deposit-contract-sync"
+      
+  prysm:
+    base_cmd: "/app/cmd/beacon-chain/beacon-chain"
+    additional_flags:
+      - "--{{ network }}"
+      - "--datadir /data"
+      - "--rpc-host 0.0.0.0"
+      - "--rpc-port {{ default_ports.cl_api_port }}"
+      - "--execution-endpoint http://{{ el_container_name }}:{{ default_ports.el_auth_port }}"
+      - "--jwt-secret /jwt.secret"
+      - "--p2p-tcp-port {{ default_ports.cl_p2p_port }}"
+      - "--p2p-udp-port {{ default_ports.cl_p2p_port }}"
+    validator_flags:
+      - "--enable-validator"
+    non_validator_flags:
+      - "--disable-monitoring"
+
+# Additional options structure (matching workflow JSON inputs)
+additional_options_schema:
+  cl_custom_image: ""
+  timeout: "24"
+  non_validator_mode: true
+  volume_size: ""
+  additional_nethermind_flags: ""
+  additional_cl_flags: ""
+  ssh_keys: ""
+  allowed_ips: ""
+  custom_machine_type: ""
+  convert_to_paprika: "false"
+
+# L2 specific options
+additional_l2_options_schema:
+  l1_nethermind_image: ""
+  l2_node_image: ""
+  l2_el_extra_flags: ""
+  l2_cl_extra_flags: ""
+  layer1_el_endpoint: ""
+  layer1_cl_endpoint: ""
+
+# Network cleanup settings
+cleanup:
+  remove_volumes: false
+  remove_images: false
+  timeout: 60 

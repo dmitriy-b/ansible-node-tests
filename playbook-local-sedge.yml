@@ -1,0 +1,203 @@
+---
+- name: Deploy Simple Local Ethereum Node using Sedge
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  vars:
+    # Sedge configuration
+    sedge_version: "latest"
+    sedge_binary: "{{ playbook_dir }}/sedge"
+    sedge_data_dir: "{{ playbook_dir }}/local-deployment"
+
+  tasks:
+    - name: Check if Docker is available
+      command: docker --version
+      register: docker_check
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if Docker is not available
+      fail:
+        msg: "Docker is not installed or not running. Please install Docker first."
+      when: docker_check.rc != 0
+
+    - name: Ensure sedge data directory exists
+      file:
+        path: "{{ sedge_data_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Get latest Sedge release info
+      uri:
+        url: "https://api.github.com/repos/NethermindEth/sedge/releases/latest"
+        method: GET
+        return_content: yes
+      register: sedge_release
+      when: sedge_version == "latest"
+      tags:
+        - sedge_update
+
+    - name: Check current Sedge version if exists
+      command: "{{ sedge_binary }} version"
+      register: current_sedge_version
+      failed_when: false
+      changed_when: false
+      when: sedge_version == "latest"
+      tags:
+        - sedge_update
+
+    - name: Extract current version number
+      set_fact:
+        current_version: "{{ current_sedge_version.stdout | regex_search('sedge (v[0-9]+\\.[0-9]+\\.[0-9]+)', '\\1') | first | default('') }}"
+      when: sedge_version == "latest" and current_sedge_version.rc == 0
+      tags:
+        - sedge_update
+
+    - name: Download or update Sedge
+      block:
+        - name: Set Sedge download URL for macOS (Apple Silicon)
+          set_fact:
+            sedge_download_url: "{{ sedge_release.json.assets | selectattr('name', 'match', '.*darwin.*arm64.*') | map(attribute='browser_download_url') | first }}"
+          when: sedge_version == "latest" and ansible_system == "Darwin" and ansible_architecture == "arm64"
+
+        - name: Set Sedge download URL for macOS (Intel)
+          set_fact:
+            sedge_download_url: "{{ sedge_release.json.assets | selectattr('name', 'match', '.*darwin.*amd64.*') | map(attribute='browser_download_url') | first }}"
+          when: sedge_version == "latest" and ansible_system == "Darwin" and ansible_architecture == "x86_64"
+
+        - name: Set Sedge download URL for Linux
+          set_fact:
+            sedge_download_url: "{{ sedge_release.json.assets | selectattr('name', 'match', '.*linux.*amd64.*') | map(attribute='browser_download_url') | first }}"
+          when: sedge_version == "latest" and ansible_system == "Linux"
+
+        - name: Download/Update Sedge binary
+          get_url:
+            url: "{{ sedge_download_url }}"
+            dest: "{{ sedge_binary }}"
+            mode: '0755'
+            force: yes
+          when: sedge_download_url is defined
+
+      when: sedge_version == "latest" and (current_sedge_version.rc != 0 or current_version != sedge_release.json.tag_name)
+      tags:
+        - sedge_update
+
+    - name: Install Sedge dependencies
+      command: "{{ sedge_binary }} deps install"
+      args:
+        chdir: "{{ playbook_dir }}"
+      register: sedge_deps
+      changed_when: "'already installed' not in sedge_deps.stdout"
+
+    - name: Create JWT secret file
+      command: openssl rand -hex 32
+      register: jwt_secret
+      changed_when: false
+
+    - name: Write JWT secret to file
+      copy:
+        content: "{{ jwt_secret.stdout }}"
+        dest: "{{ sedge_data_dir }}/jwtsecret"
+        mode: '0600'
+
+    - name: Generate Sedge configuration
+      block:
+        - name: Set consensus client image mapping
+          set_fact:
+            cl_client_images:
+              lighthouse: "sigp/lighthouse:latest"
+              prysm: "prysmaticlabs/prysm-beacon-chain:latest"
+              teku: "consensys/teku:latest"
+              lodestar: "chainsafe/lodestar:latest"
+
+        - name: Build base Sedge generate command
+          set_fact:
+            sedge_cmd: >-
+              {{ sedge_binary }} generate
+              --logging none
+              full-node
+              --no-mev-boost
+              {% if non_validator_mode | default(true) | bool %}--no-validator{% endif %}
+              --latest
+              --map-all
+              --network {{ network | default('sepolia') }}
+              -c {{ cl_client | default('lodestar') }}:{{ cl_client_images[cl_client | default('lodestar')] | default((cl_client | default('lodestar')) + ':latest') }}
+              --jwt-secret-path {{ sedge_data_dir }}/jwtsecret
+              -p {{ sedge_data_dir }}
+
+        - name: Add sync mode specific flags
+          set_fact:
+            sedge_cmd: >-
+              {{ sedge_cmd }}
+              {% if (sync_mode | default('fast')) == 'fast' %}--el-extra-flag Sync.SnapSync=false{% endif %}
+              {% if (sync_mode | default('fast')) == 'archive' %}--el-extra-flag config={{ network | default('sepolia') }}_archive{% endif %}
+
+        - name: Execute Sedge generate command
+          command: "{{ sedge_cmd }}"
+          args:
+            chdir: "{{ sedge_data_dir }}"
+          register: sedge_generate
+          changed_when: true
+
+        - name: Display Sedge generation result
+          debug:
+            msg: "Sedge configuration generated successfully"
+
+    - name: Start Ethereum node using Sedge run command
+      block:
+        - name: Stop any existing containers
+          command: "{{ sedge_binary }} down -p {{ sedge_data_dir }}"
+          args:
+            chdir: "{{ sedge_data_dir }}"
+          register: sedge_down
+          failed_when: false
+          changed_when: sedge_down.rc == 0
+
+        - name: Start Ethereum node with Sedge
+          command: "{{ sedge_binary }} run -p {{ sedge_data_dir }}"
+          args:
+            chdir: "{{ sedge_data_dir }}"
+          register: sedge_run
+          changed_when: true
+
+        - name: Wait for containers to start
+          wait_for:
+            timeout: 10
+          delegate_to: localhost
+
+        - name: Check container status
+          command: docker ps --filter "name=sedge"
+          register: container_status
+          changed_when: false
+
+        - name: Display deployment summary
+          debug:
+            msg:
+              - "=== Ethereum Node Deployed Successfully using Sedge ==="
+              - "Network: {{ network | default('sepolia') }}"
+              - "Execution Client: nethermind"
+              - "Consensus Client: {{ cl_client | default('lodestar') }}"
+              - "Sync Mode: {{ sync_mode | default('fast') }}"
+              - "Non-validator Mode: {{ non_validator_mode | default(true) }}"
+              - ""
+              - "Container Status:"
+              - "{{ container_status.stdout_lines }}"
+              - ""
+              - "Data Directory: {{ sedge_data_dir }}"
+              - "JWT Secret: {{ sedge_data_dir }}/jwtsecret"
+              - ""
+              - "Management Commands:"
+              - "  Start: {{ sedge_binary }} run -p {{ sedge_data_dir }}"
+              - "  Stop:  {{ sedge_binary }} down -p {{ sedge_data_dir }}"
+              - "  Logs:  {{ sedge_binary }} logs -p {{ sedge_data_dir }}"
+              - ""
+              - "Manual Debugging (without Ansible):"
+              - "  1. Generate: {{ sedge_cmd }}"
+              - "  2. Run:      {{ sedge_binary }} run -p {{ sedge_data_dir }}"
+              - ""
+              - "Ports:"
+              - "  Execution RPC: 8545"
+              - "  Execution Engine: 8551"
+              - "  Consensus API: 4000"
+              - "  P2P: 30303 (EL), 9000 (CL)"
+              - "  Metrics: 8008 (EL), 5054 (CL)" 

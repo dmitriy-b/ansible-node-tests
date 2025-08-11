@@ -1,0 +1,48 @@
+# Environment files containing sensitive information
+.env
+.env.local
+.env.*.local
+
+# Python virtual environment
+venv/
+env/
+.venv/
+
+# Ansible logs
+ansible.log
+*.log
+
+# Temporary files
+/tmp/
+.ansible/
+.ansible_vault_password
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ansible retry files
+*.retry
+
+# Artifacts directory (may contain sensitive info)
+artifacts/
+
+# Build and distribution directories
+build/
+dist/
+*.egg-info/ 
+
+.history/*
