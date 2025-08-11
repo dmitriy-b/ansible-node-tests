@@ -46,3 +46,5 @@ dist/
 *.egg-info/ 
 
 .history/*
+collections/*
+local-deployment/*

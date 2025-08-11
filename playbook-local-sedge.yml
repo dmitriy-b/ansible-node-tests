@@ -27,48 +27,66 @@
         state: directory
         mode: '0755'
 
+    - name: Check if Sedge binary exists
+      stat:
+        path: "{{ sedge_binary }}"
+      register: sedge_exists
+
+    - name: Debug sedge conditions
+      debug:
+        msg: 
+          - "Binary exists: {{ sedge_exists.stat.exists }}"
+          - "Sedge version: {{ sedge_version }}"
+          - "Should download: {{ not sedge_exists.stat.exists or sedge_version == 'latest' }}"
+
+    - name: Fail if Sedge binary missing and updates skipped
+      fail:
+        msg: |
+          Sedge binary not found at {{ sedge_binary }}.
+          You are skipping sedge_update tags, but Sedge needs to be downloaded first.
+          Please run without --skip-tags sedge_update, or download Sedge manually.
+      when: not sedge_exists.stat.exists and 'sedge_update' in ansible_skip_tags | default([])
+
     - name: Get latest Sedge release info
       uri:
         url: "https://api.github.com/repos/NethermindEth/sedge/releases/latest"
         method: GET
         return_content: yes
       register: sedge_release
-      when: sedge_version == "latest"
-      tags:
-        - sedge_update
+      when: not sedge_exists.stat.exists or sedge_version == "latest"
 
     - name: Check current Sedge version if exists
       command: "{{ sedge_binary }} version"
       register: current_sedge_version
       failed_when: false
       changed_when: false
-      when: sedge_version == "latest"
+      when: sedge_version == "latest" and sedge_exists.stat.exists
       tags:
-        - sedge_update
+        - sedge_version_check
 
     - name: Extract current version number
       set_fact:
         current_version: "{{ current_sedge_version.stdout | regex_search('sedge (v[0-9]+\\.[0-9]+\\.[0-9]+)', '\\1') | first | default('') }}"
-      when: sedge_version == "latest" and current_sedge_version.rc == 0
+      when: sedge_version == "latest" and current_sedge_version is defined and not current_sedge_version.skipped | default(false) and current_sedge_version.rc == 0
       tags:
-        - sedge_update
+        - sedge_version_check
 
     - name: Download or update Sedge
       block:
         - name: Set Sedge download URL for macOS (Apple Silicon)
           set_fact:
             sedge_download_url: "{{ sedge_release.json.assets | selectattr('name', 'match', '.*darwin.*arm64.*') | map(attribute='browser_download_url') | first }}"
-          when: sedge_version == "latest" and ansible_system == "Darwin" and ansible_architecture == "arm64"
+          when: ansible_system == "Darwin" and ansible_architecture == "arm64"
 
         - name: Set Sedge download URL for macOS (Intel)
           set_fact:
             sedge_download_url: "{{ sedge_release.json.assets | selectattr('name', 'match', '.*darwin.*amd64.*') | map(attribute='browser_download_url') | first }}"
-          when: sedge_version == "latest" and ansible_system == "Darwin" and ansible_architecture == "x86_64"
+          when: ansible_system == "Darwin" and ansible_architecture == "x86_64"
 
         - name: Set Sedge download URL for Linux
           set_fact:
             sedge_download_url: "{{ sedge_release.json.assets | selectattr('name', 'match', '.*linux.*amd64.*') | map(attribute='browser_download_url') | first }}"
-          when: sedge_version == "latest" and ansible_system == "Linux"
+          when: ansible_system == "Linux"
 
         - name: Download/Update Sedge binary
           get_url:
@@ -78,9 +96,7 @@
             force: yes
           when: sedge_download_url is defined
 
-      when: sedge_version == "latest" and (current_sedge_version.rc != 0 or current_version != sedge_release.json.tag_name)
-      tags:
-        - sedge_update
+      when: not sedge_exists.stat.exists or (sedge_version == "latest" and sedge_exists.stat.exists and 'sedge_version_check' not in ansible_skip_tags | default([]) and (current_sedge_version is defined and not current_sedge_version.skipped | default(false) and (current_sedge_version.rc != 0 or (current_version is defined and current_version != sedge_release.json.tag_name))))
 
     - name: Install Sedge dependencies
       command: "{{ sedge_binary }} deps install"
@@ -88,6 +104,7 @@
         chdir: "{{ playbook_dir }}"
       register: sedge_deps
       changed_when: "'already installed' not in sedge_deps.stdout"
+      when: sedge_exists.stat.exists
 
     - name: Create JWT secret file
       command: openssl rand -hex 32
