@@ -1,0 +1,78 @@
+Vagrant.configure("2") do |config|
+  # Ubuntu ARM64 box for VirtualBox on Apple Silicon
+  config.vm.box = "{{ vagrant_box | default('net9/ubuntu-24.04-arm64') }}"
+
+  # Name and hostname
+  config.vm.hostname = "ansible-tests"
+
+  # Networking (optional; uncomment to forward ports if you want host access)
+  # config.vm.network :forwarded_port, guest: 8545, host: 8545
+  # config.vm.network :forwarded_port, guest: 4000, host: 4000
+
+  # Sync the project directory (default)
+  config.vm.synced_folder ".", "/vagrant", type: "virtualbox"
+
+  # Optional: mount a faster internal path for data to avoid shared-folder FS issues
+  # Disable if you want everything under /vagrant only
+  config.vm.provision "shell", privileged: true, inline: <<-SHELL
+mkdir -p /opt/sedge
+chown -R vagrant:vagrant /opt/sedge
+SHELL
+
+  # Provider settings
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "ansible-tests"
+    vb.cpus = {{ vb_cpus | default(4) }}
+    vb.memory = {{ vb_memory | default(4096) }}
+    # vb.gui = true
+  end
+
+  # Optional disk resize (requires vagrant-disksize plugin on host)
+  if Vagrant.has_plugin?("vagrant-disksize")
+    config.disksize.size = "{{ vb_disk_size | default('100GB') }}"
+  end
+
+  # Ensure base dependencies inside the guest
+  config.vm.provision "shell", privileged: true, inline: <<-SHELL
+set -euxo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends \
+  ca-certificates curl gnupg lsb-release software-properties-common \
+  openssl python3 python3-pip python3-apt ansible-core \
+  docker.io docker-compose-v2
+
+systemctl enable --now docker || true
+usermod -aG docker vagrant || true
+
+# helpful: avoid interactive tzdata prompts etc.
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+SHELL
+
+  # Run the existing localhost playbook inside the guest via Vagrant
+  # Named provisioner so we can target it explicitly
+  config.vm.provision "sedge_ansible", type: "ansible_local", run: "never" do |ansible|
+    ansible.playbook = "/vagrant/playbook-local-sedge.yml"
+    ansible.compatibility_mode = "2.0"
+    ansible.verbose = "v"
+    ansible.install = false
+    ansible.become = true
+
+    # Allow passing extra vars through environment variables
+    ansible.extra_vars = {
+      "network" => ENV['NETWORK'] || 'sepolia',
+      "cl_client" => ENV['CL_CLIENT'] || 'lodestar',
+      "sync_mode" => ENV['SYNC_MODE'] || 'fast',
+      "non_validator_mode" => (ENV['NON_VALIDATOR_MODE'] || 'true'),
+      "reset" => (ENV['RESET'] || 'false'),
+      "sedge_data_dir" => ENV['VAGRANT_SEDGE_DIR'] || '/vagrant/local-deployment'
+    }
+
+    # Support raw arguments injection for advanced flags/verbosity
+    if ENV['ANSIBLE_LOCAL_ARGS'] && !ENV['ANSIBLE_LOCAL_ARGS'].empty?
+      require 'shellwords'
+      ansible.raw_arguments = Shellwords.split(ENV['ANSIBLE_LOCAL_ARGS'])
+    end
+  end
+end 

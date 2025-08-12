@@ -1,0 +1,60 @@
+---
+- name: Generate Vagrantfile, boot VM, and run playbook inside it
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    vagrant_dir: "{{ playbook_dir }}"
+    vagrantfile_path: "{{ vagrant_dir }}/Vagrantfile"
+    vagrant_box: "net9/ubuntu-24.04-arm64"
+    vb_cpus: 4
+    vb_memory: 4096
+
+  tasks:
+    - name: Verify required host tools (vagrant, VBoxManage)
+      shell: |
+        set -e
+        vagrant --version >/dev/null
+        VBoxManage -v >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Render Vagrantfile from template
+      template:
+        src: templates/Vagrantfile.j2
+        dest: "{{ vagrantfile_path }}"
+        mode: "0644"
+
+    - name: Ensure .vagrant folder exists
+      file:
+        path: "{{ vagrant_dir }}/.vagrant"
+        state: directory
+        mode: "0755"
+
+    - name: vagrant up (VirtualBox)
+      command: vagrant up --provider=virtualbox --provision
+      args:
+        chdir: "{{ vagrant_dir }}"
+      register: vagrant_up
+      changed_when: "'Machine booted and ready!' in vagrant_up.stdout or 'has been created' in vagrant_up.stdout or 'Running provisioner' in vagrant_up.stdout"
+
+    - name: Show vagrant status
+      command: vagrant status
+      args:
+        chdir: "{{ vagrant_dir }}"
+      register: vagrant_status
+      changed_when: false
+
+    # - name: Run the provided playbook inside the VM via vagrant
+    #   command: >-
+    #     vagrant ssh -c "sudo ANSIBLE_FORCE_COLOR=1 ansible-playbook /vagrant/playbook-local-sedge.yml"
+    #   args:
+    #     chdir: "{{ vagrant_dir }}"
+    #   register: inner_play
+    #   changed_when: true
+
+    - name: Print inner play output
+      debug:
+        var: inner_play.stdout 
