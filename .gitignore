@@ -48,3 +48,4 @@ dist/
 .history/*
 collections/*
 local-deployment/*
+.vagrant/*
