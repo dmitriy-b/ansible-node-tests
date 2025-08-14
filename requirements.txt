@@ -26,6 +26,9 @@ cryptography>=3.4.0
 # Note: docker module will be installed separately if needed
 # docker>=6.0.0
 
+# Proxmox API driver (required by community.proxmox)
+proxmoxer>=2.0.0
+
 # Development and testing (optional)
 # pytest>=6.0.0
 # pytest-ansible>=3.0.0

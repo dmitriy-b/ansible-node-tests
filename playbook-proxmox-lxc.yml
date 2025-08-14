@@ -1,0 +1,149 @@
+---
+- name: Create and start Proxmox LXC container(s) from CT template
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # API/Secrets
+    proxmox_api_host: "{{ lookup('env', 'PROXMOX_API_HOST') | default(omit) }}"
+    proxmox_api_port: "{{ (lookup('env', 'PROXMOX_API_PORT') | default(8006, true)) | int }}"
+    proxmox_validate_certs: "{{ (lookup('env', 'PROXMOX_VALIDATE_CERTS') | default(true, true)) | bool }}"
+
+    proxmox_api_token_id: "{{ lookup('env', 'PROXMOX_API_TOKEN_ID') | default(omit) }}"      # e.g. user@pve!ci OR ci
+    proxmox_api_token_secret: "{{ lookup('env', 'PROXMOX_API_TOKEN_SECRET') | default(omit) }}"
+
+    proxmox_api_user: "{{ lookup('env', 'PROXMOX_API_USER') | default(omit) }}"              # e.g. user@pve
+    proxmox_api_password: "{{ lookup('env', 'PROXMOX_API_PASSWORD') | default(omit) }}"
+
+    # Derived auth
+    proxmox_token_has_user: "{{ proxmox_api_token_id is defined and ('!' in proxmox_api_token_id) }}"
+    proxmox_token_user_part: "{{ proxmox_api_token_id.split('!')[0] if proxmox_token_has_user else omit }}"
+    proxmox_token_name: "{{ proxmox_api_token_id.split('!')[1] if proxmox_token_has_user else proxmox_api_token_id if proxmox_api_token_id is defined else omit }}"
+
+    proxmox_effective_user: "{{ proxmox_api_user if proxmox_api_user is defined else (proxmox_token_user_part if proxmox_token_has_user else omit) }}"
+    proxmox_use_password_auth: "{{ proxmox_api_password is defined and proxmox_effective_user is defined }}"
+    proxmox_use_token_auth: "{{ proxmox_token_name is defined and proxmox_api_token_secret is defined and proxmox_effective_user is defined }}"
+    proxmox_credentials_present: "{{ proxmox_api_host is defined and (proxmox_use_token_auth or proxmox_use_password_auth) }}"
+
+    # Core params
+    proxmox_node: "{{ lookup('env', 'PROXMOX_NODE') | default('pve', true) }}"
+    proxmox_storage: "{{ lookup('env', 'PROXMOX_STORAGE') | default('local-lvm', true) }}"    # data storage for rootfs
+    proxmox_template_storage: "{{ lookup('env', 'PROXMOX_CT_TEMPLATE_STORAGE') | default('local', true) }}"  # where CT templates live
+
+    # CT template file; either full 'local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst' or just the filename
+    proxmox_ct_template_file: "{{ lookup('env', 'PROXMOX_CT_TEMPLATE') | default('ubuntu-22.04-standard_22.04-1_amd64.tar.zst', true) }}"
+    proxmox_ct_ostemplate: "{{ (proxmox_ct_template_file if ':' in proxmox_ct_template_file else proxmox_template_storage ~ ':vztmpl/' ~ proxmox_ct_template_file) }}"
+
+    # Container matrix (array of CT specs)
+    proxmox_cts: |
+      {{
+        lookup('env', 'PROXMOX_CTS_JSON')
+        | default('[{"hostname":"ct-01","vmid":201,"cores":2,"memory":2048,"disk_gb":10,"ip":"dhcp","net_bridge":"vmbr0"}]', true)
+      }}
+
+    # CT defaults
+    ct_unprivileged: "{{ (lookup('env', 'PROXMOX_CT_UNPRIVILEGED') | default(true, true)) | bool }}"
+    ct_nesting: "{{ (lookup('env', 'PROXMOX_CT_NESTING') | default(true, true)) | bool }}"
+    ct_swap: "{{ (lookup('env', 'PROXMOX_CT_SWAP_MB') | default(0, true)) | int }}"
+
+    # Root auth
+    ct_password: "{{ lookup('env', 'CT_PASSWORD') | default(omit, true) }}"
+    ct_pubkey: "{{ lookup('env', 'CT_SSH_AUTHORIZED_KEYS') | default(omit, true) }}"
+
+  tasks:
+    - name: Parse CT matrix
+      ansible.builtin.set_fact:
+        ct_matrix: "{{ proxmox_cts if proxmox_cts is not string else (proxmox_cts | from_json) }}"
+
+    - name: Sanity check node name isn't a realm
+      ansible.builtin.assert:
+        that:
+          - proxmox_node not in ['pam', 'pve@pam']
+        fail_msg: "PROXMOX_NODE must be the PVE node name (e.g. 'pve'), not a realm like 'pam'"
+      when: proxmox_node is defined
+
+    - name: Warn when Proxmox credentials are missing
+      ansible.builtin.debug:
+        msg: >-
+          No Proxmox API credentials detected. Export either token creds (PROXMOX_API_TOKEN_ID, PROXMOX_API_TOKEN_SECRET)
+          or password creds (PROXMOX_API_USER, PROXMOX_API_PASSWORD). API operations will be skipped.
+      when: not proxmox_credentials_present
+
+    - name: Validate required vars (runtime only)
+      ansible.builtin.assert:
+        that:
+          - proxmox_api_host is defined
+          - ct_matrix | length > 0
+          - proxmox_effective_user is defined
+          - (proxmox_use_token_auth or proxmox_use_password_auth)
+        fail_msg: "Missing required Proxmox credentials or empty CT matrix"
+      when: not ansible_check_mode and proxmox_credentials_present
+
+    - name: Show CT plan (check mode)
+      ansible.builtin.debug:
+        var: ct_matrix
+      when: ansible_check_mode
+
+    - name: Ensure LXC container(s) exist
+      community.general.proxmox:
+        api_host: "{{ proxmox_api_host }}"
+        api_port: "{{ proxmox_api_port }}"
+        validate_certs: "{{ proxmox_validate_certs }}"
+        api_user: "{{ proxmox_effective_user }}"
+        api_password: "{{ proxmox_api_password if proxmox_use_password_auth else omit }}"
+        api_token_id: "{{ proxmox_token_name if proxmox_use_token_auth else omit }}"
+        api_token_secret: "{{ proxmox_api_token_secret if proxmox_use_token_auth else omit }}"
+
+        node: "{{ proxmox_node }}"
+        vmid: "{{ (item.vmid | int) if (item.vmid | default(0))|int > 0 else omit }}"
+        hostname: "{{ item.hostname }}"
+
+        state: present
+        storage: "{{ proxmox_storage }}"
+        ostemplate: "{{ proxmox_ct_ostemplate }}"
+
+        # Resources
+        cores: "{{ item.cores | default(1) }}"
+        memory: "{{ item.memory | default(1024) }}"
+        swap: "{{ item.swap | default(ct_swap) }}"
+        disk: "{{ proxmox_storage }}:{{ (item.disk_gb | default(10)) | int }}"
+
+        # Net
+        netif: {
+          "net0": "name=eth0,{{ 'ip=dhcp' if (item.ip | default('dhcp')) == 'dhcp' else 'ip=' ~ item.ip ~ ',gw=' ~ (item.gw | default('')) }},bridge={{ item.net_bridge | default('vmbr0') }}"
+        }
+
+        # Security/features
+        unprivileged: "{{ item.unprivileged | default(ct_unprivileged) }}"
+        features: "{{ 'nesting=1' if (item.nesting | default(ct_nesting)) else omit }}"
+
+        # Root access
+        password: "{{ item.password | default(ct_password) | default(omit, true) }}"
+        pubkey: "{{ item.pubkey | default(ct_pubkey) | default(omit, true) }}"
+
+        onboot: "{{ item.onboot | default(true) }}"
+        timeout: 60
+      loop: "{{ ct_matrix }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      when: not ansible_check_mode and proxmox_credentials_present
+
+    - name: Start LXC container(s)
+      community.general.proxmox:
+        api_host: "{{ proxmox_api_host }}"
+        api_port: "{{ proxmox_api_port }}"
+        validate_certs: "{{ proxmox_validate_certs }}"
+        api_user: "{{ proxmox_effective_user }}"
+        api_password: "{{ proxmox_api_password if proxmox_use_password_auth else omit }}"
+        api_token_id: "{{ proxmox_token_name if proxmox_use_token_auth else omit }}"
+        api_token_secret: "{{ proxmox_api_token_secret if proxmox_use_token_auth else omit }}"
+
+        vmid: "{{ (item.vmid | int) if (item.vmid | default(0))|int > 0 else omit }}"
+        node: "{{ proxmox_node }}"
+        state: started
+        timeout: 60
+      loop: "{{ ct_matrix }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      when: not ansible_check_mode and proxmox_credentials_present 
