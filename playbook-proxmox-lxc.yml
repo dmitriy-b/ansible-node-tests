@@ -51,6 +51,68 @@
     ct_password: "{{ lookup('env', 'CT_PASSWORD') | default(omit, true) }}"
     ct_pubkey: "{{ lookup('env', 'CT_SSH_AUTHORIZED_KEYS') | default(omit, true) }}"
 
+    # Optional SSH to Proxmox host for IP discovery
+    proxmox_fetch_ip_via_ssh: "{{ (lookup('env','PROXMOX_FETCH_IP_VIA_SSH') | default(true, true)) | bool }}"
+    proxmox_ssh_user: "{{ lookup('env', 'PROXMOX_SSH_USER') | default('root', true) }}"
+    proxmox_ssh_port: "{{ (lookup('env', 'PROXMOX_SSH_PORT') | default(22, true)) | int }}"
+    proxmox_ssh_key_path: "{{ lookup('env', 'PROXMOX_SSH_KEY_PATH') | default('', true) }}"
+    proxmox_ssh_use_sudo: "{{ (lookup('env', 'PROXMOX_SSH_USE_SUDO') | default(proxmox_ssh_user != 'root', true)) | bool }}"
+
+    # Prefer SSH-based IP discovery by default; API static-only fallback optional
+    proxmox_fetch_ip_via_api: "{{ (lookup('env','PROXMOX_FETCH_IP_VIA_API') | default(false, true)) | bool }}"
+    proxmox_api_base_url: "https://{{ proxmox_api_host }}:{{ proxmox_api_port }}/api2/json"
+
+  pre_tasks:
+    - name: Locate local SSH public key for containers (auto)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ lookup('env','HOME') + '/.ssh/id_ed25519.pub' }}"
+        - "{{ lookup('env','HOME') + '/.ssh/id_rsa.pub' }}"
+      register: ssh_key_stats
+      when: (lookup('env','CT_SSH_AUTHORIZED_KEYS') | default('', true) | trim | length) == 0
+
+    - name: Read first found SSH public key
+      ansible.builtin.slurp:
+        path: "{{ (ssh_key_stats.results | selectattr('stat.exists', 'equalto', true) | map(attribute='item') | list)[0] }}"
+      register: fallback_pubkey_content
+      when: (lookup('env','CT_SSH_AUTHORIZED_KEYS') | default('', true) | trim | length) == 0 and (ssh_key_stats.results | selectattr('stat.exists','equalto', true) | list | length) > 0
+
+    - name: Use local SSH public key for containers
+      ansible.builtin.set_fact:
+        ct_pubkey: "{{ (fallback_pubkey_content.content | b64decode) | trim }}"
+      when: (lookup('env','CT_SSH_AUTHORIZED_KEYS') | default('', true) | trim | length) == 0 and fallback_pubkey_content is defined
+
+    - name: Login to Proxmox API (password auth) to get ticket
+      ansible.builtin.uri:
+        url: "{{ proxmox_api_base_url }}/access/ticket"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: "{{ proxmox_effective_user }}"
+          password: "{{ proxmox_api_password }}"
+        return_content: true
+        status_code: 200
+        validate_certs: "{{ proxmox_validate_certs }}"
+      register: proxmox_login
+      failed_when: false
+      when:
+        - proxmox_fetch_ip_via_api
+        - proxmox_credentials_present
+        - proxmox_use_password_auth
+
+    - name: Build Proxmox API auth headers
+      ansible.builtin.set_fact:
+        proxmox_api_auth_headers: >-
+          {{
+            ({ 'Authorization': 'PVEAPIToken=' ~ proxmox_effective_user ~ '!' ~ proxmox_token_name ~ '=' ~ proxmox_api_token_secret })
+            if proxmox_use_token_auth else
+            ({ 'Cookie': 'PVEAuthCookie=' ~ (proxmox_login.json.data.ticket | default('')), 'CSRFPreventionToken': (proxmox_login.json.data.CSRFPreventionToken | default('')) })
+          }}
+      when:
+        - proxmox_fetch_ip_via_api
+        - proxmox_credentials_present
+
   tasks:
     - name: Parse CT matrix
       ansible.builtin.set_fact:
@@ -147,3 +209,94 @@
       loop_control:
         label: "{{ item.hostname }}"
       when: not ansible_check_mode and proxmox_credentials_present 
+
+    - name: Setup SSH authorized_keys in containers (via SSH to Proxmox host)
+      ansible.builtin.shell: |
+        ssh -p {{ proxmox_ssh_port }} {% if proxmox_ssh_key_path | length > 0 %}-i {{ proxmox_ssh_key_path }} {% endif %}-o StrictHostKeyChecking=no -o BatchMode=yes {{ proxmox_ssh_user }}@{{ proxmox_api_host }} bash -lc '
+          vmid_in="{{ (item.vmid | default("") ) }}";
+          if [ -z "$vmid_in" ]; then vmid_in=$({{ 'sudo -n ' if proxmox_ssh_use_sudo else '' }}pct list | awk -v name="{{ item.hostname }}" '\''NR>1 && $0 ~ name {print $1; exit}'\''); fi;
+          {{ 'sudo -n ' if proxmox_ssh_use_sudo else '' }}pct exec "$vmid_in" -- bash -c "
+            mkdir -p /root/.ssh;
+            chmod 700 /root/.ssh;
+            echo '\''{{ ct_pubkey }}'\'' >> /root/.ssh/authorized_keys;
+            chmod 600 /root/.ssh/authorized_keys;
+            chown root:root /root/.ssh/authorized_keys;
+            echo '\''SSH key added to container $vmid_in'\'';
+          "'
+      args:
+        executable: /bin/bash
+      register: ssh_setup_result
+      loop: "{{ ct_matrix }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      changed_when: false
+      failed_when: false
+      when:
+        - not ansible_check_mode
+        - proxmox_credentials_present
+        - ct_pubkey is defined
+        - ct_pubkey | length > 0
+        - proxmox_fetch_ip_via_ssh
+
+    - name: Init connection info list
+      ansible.builtin.set_fact:
+        ct_connection_info: []
+      when:
+        - not ansible_check_mode
+
+    - name: Determine VMID and IP for containers (via SSH to Proxmox host)
+      ansible.builtin.shell: |
+        ssh -p {{ proxmox_ssh_port }} {% if proxmox_ssh_key_path | length > 0 %}-i {{ proxmox_ssh_key_path }} {% endif %}-o StrictHostKeyChecking=no -o BatchMode=yes {{ proxmox_ssh_user }}@{{ proxmox_api_host }} bash -lc '
+          ip_static="{{ (item.ip | default("dhcp")) }}";
+          if [ "$ip_static" != "dhcp" ]; then
+            echo "##VMID##:{{ (item.vmid | default("") ) }} ##IPV4##:{{ (item.ip | string | split('/') | first) }}";
+          else
+            vmid_in="{{ (item.vmid | default("") ) }}";
+            if [ -z "$vmid_in" ]; then vmid_in=$({{ 'sudo -n ' if proxmox_ssh_use_sudo else '' }}pct list | awk -v name="{{ item.hostname }}" '\''NR>1 && $0 ~ name {print $1; exit}'\''); fi;
+            ip4=$({{ 'sudo -n ' if proxmox_ssh_use_sudo else '' }}pct exec "$vmid_in" -- sh -lc "ip -4 -o addr show dev eth0 | awk '\''{print $4}'\'' | cut -d/ -f1 | head -n1" 2>/dev/null || true);
+            if [ -z "$ip4" ]; then
+              ip4=$({{ 'sudo -n ' if proxmox_ssh_use_sudo else '' }}pct exec "$vmid_in" -- sh -lc "hostname -I | awk '\''{print $1}'\'' | tr -d '[:space:]'" 2>/dev/null || true);
+            fi;
+            if [ -z "$ip4" ]; then
+              ip4=$({{ 'sudo -n ' if proxmox_ssh_use_sudo else '' }}pct exec "$vmid_in" -- sh -lc "ip -4 route get 1.1.1.1 | awk '\''/src/ {print $7; exit}'\''" 2>/dev/null || true);
+            fi;
+            echo "##VMID##:$vmid_in ##IPV4##:$ip4";
+          fi'
+      args:
+        executable: /bin/bash
+      register: conn_info_result
+      loop: "{{ ct_matrix }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      changed_when: false
+      failed_when: false
+      retries: 15
+      delay: 2
+      until: (conn_info_result.stdout is search('##IPV4##:[0-9.]+')) or ((item.ip | default('dhcp')) != 'dhcp')
+      when:
+        - not ansible_check_mode
+        - proxmox_credentials_present
+        - proxmox_fetch_ip_via_ssh
+
+    - name: Build connection info (via SSH results)
+      ansible.builtin.set_fact:
+        ct_connection_info: "{{ (ct_connection_info | default([])) + [ {
+          'hostname': item.item.hostname,
+          'vmid': ((item.stdout | default('') | regex_search('##VMID##:[0-9]+') | default('') | regex_replace('^##VMID##:','')) | default((item.item.vmid | string), true)),
+          'ip': ((item.stdout | default('') | regex_search('([0-9]{1,3}(?:\\.[0-9]{1,3}){3})') | default('')) | default((((item.item.ip | default('dhcp')) != 'dhcp') | ternary(((item.item.ip | string) | split('/') | first), '')), true))
+        } ] }}"
+      loop: "{{ conn_info_result.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.hostname }}"
+      when:
+        - not ansible_check_mode
+        - proxmox_fetch_ip_via_ssh
+
+    - name: Print connection summary
+      ansible.builtin.debug:
+        msg: "{{ item.hostname }}: ip={{ item.ip | default('unknown', true) }} | vmid={{ item.vmid | default('?', true) }} | ssh: {{ 'ssh root@' ~ (item.ip | default('', true)) if ((item.ip | default('', true)) | length > 0) else 'ssh root@<IP>' }}"
+      loop: "{{ ct_connection_info | default([]) }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      when:
+        - not ansible_check_mode 
