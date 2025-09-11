@@ -27,7 +27,7 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m # No Color
 
-.PHONY: help venv install clean test run run-dev run-prod check-env lint validate clean-artifacts info activate local-deploy local-dev local-mainnet local-status local-stop local-clean local-logs check-docker local-validate local-archive vagrant-up vagrant-provision vagrant-deploy vagrant-halt vagrant-destroy vagrant-ssh
+.PHONY: help venv install clean test run run-dev run-prod check-env lint validate clean-artifacts info activate local-deploy local-dev local-mainnet local-status local-stop local-clean local-logs check-docker local-validate local-archive vagrant-up vagrant-provision vagrant-deploy vagrant-halt vagrant-destroy vagrant-ssh proxmox-deploy
 
 # Default target
 .DEFAULT_GOAL := help
@@ -360,7 +360,7 @@ vagrant-provision: ## Re-run provisioning on the Vagrant VM
 
 vagrant-deploy: ## Provision the VM with Ansible (ansible_local) and run playbook-local-sedge.yml
 	@echo "Deploying via Vagrant ansible_local: NETWORK=$(NETWORK), CL_CLIENT=$(CL_CLIENT), SYNC_MODE=$(SYNC_MODE), UPDATE=$(UPDATE)"
-				NETWORK=$(NETWORK) CL_CLIENT=$(CL_CLIENT) SYNC_MODE=$(SYNC_MODE) NON_VALIDATOR_MODE=$(NON_VALIDATOR_MODE) RESET=$(RESET) VAGRANT_SEDGE_DIR=$(VAGRANT_SEDGE_DIR) \
+			NETWORK=$(NETWORK) CL_CLIENT=$(CL_CLIENT) SYNC_MODE=$(SYNC_MODE) NON_VALIDATOR_MODE=$(NON_VALIDATOR_MODE) RESET=$(RESET) VAGRANT_SEDGE_DIR=$(VAGRANT_SEDGE_DIR) \
 		ANSIBLE_LOCAL_ARGS="$(if $(filter-out true,$(UPDATE)),--skip-tags sedge_update,) $(VERBOSITY)" \
    	  	vagrant provision --provision-with sedge_ansible 2>&1 | tee .vagrant/ansible_local_provision.log
 	@echo "Saved ansible_local log to .vagrant/ansible_local_provision.log"
@@ -374,4 +374,30 @@ vagrant-destroy: ## Destroy the Vagrant VM
 vagrant-ssh: ## Open SSH session to the Vagrant VM
 	vagrant ssh
 
- 
+# Proxmox deployment target
+# Usage example:
+# make proxmox-deploy NETWORK=chiado CL_CLIENT=lodestar SYNC_MODE=fast RESET=true PROXMOX_HOST_NAME=vm-chiado PROXMOX_HOST=10.0.0.50 PROXMOX_USER=ubuntu SEDGE_DIR=/opt/sedge/local-deployment
+PROXMOX_HOST_NAME ?= vm-ethnode
+PROXMOX_HOST ?=
+PROXMOX_USER ?= ubuntu
+SEDGE_DIR ?= /opt/sedge/local-deployment
+
+proxmox-deploy: install ## Create/ensure Proxmox VM(s) and deploy node inside
+	@echo -e "$(BLUE)Provisioning Proxmox VM(s) via API (optional) ...$(NC)"
+	$(ANSIBLE_PLAYBOOK) playbook-proxmox.yml $(VERBOSITY) || true
+	@echo -e "$(BLUE)Updating inventory with provided Proxmox host ...$(NC)"
+	@if [ -n "$(PROXMOX_HOST)" ]; then \
+		awk '1; $$0=="[proxmox]"{p=1; print; next} p&&/^$$/{p=0} p{next}' inventory.ini > inventory.tmp && mv inventory.tmp inventory.ini; \
+		echo "[proxmox]" >> inventory.ini; \
+		echo "$(PROXMOX_HOST_NAME) ansible_host=$(PROXMOX_HOST) ansible_user=$(PROXMOX_USER) ansible_python_interpreter=/usr/bin/python3" >> inventory.ini; \
+	fi
+	@echo -e "$(BLUE)Ensuring Docker & deps installed on Proxmox host and running Sedge ...$(NC)"
+	$(ANSIBLE_PLAYBOOK) -i inventory.ini playbook-proxmox-run.yml \
+		-e "target_host=$(PROXMOX_HOST_NAME)" \
+		-e "network=$(NETWORK)" \
+		-e "cl_client=$(CL_CLIENT)" \
+		-e "sync_mode=$(SYNC_MODE)" \
+		-e "non_validator_mode=$(NON_VALIDATOR_MODE)" \
+		-e "reset=$(RESET)" \
+		-e "sedge_data_dir=$(SEDGE_DIR)" \
+		$(VERBOSITY) 
