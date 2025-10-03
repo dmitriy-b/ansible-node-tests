@@ -1,0 +1,39 @@
+---
+# Simplified playbook for creating a .env file from env.example
+# Usage: ansible-playbook setup-env.yml
+
+- name: Create .env file from env.example
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  tasks:
+    - name: Check if .env file exists
+      stat:
+        path: .env
+      register: env_file
+    
+    - name: Check if env.example file exists
+      stat:
+        path: env.example
+      register: example_file
+      when: not env_file.stat.exists
+    
+    - name: Fail if env.example doesn't exist
+      fail:
+        msg: "env.example file not found. Cannot create .env file."
+      when: not env_file.stat.exists and not example_file.stat.exists
+    
+    - name: Copy env.example to .env
+      copy:
+        src: env.example
+        dest: .env
+        mode: '0600'
+      when: not env_file.stat.exists and example_file.stat.exists
+    
+    - name: Show success message
+      debug:
+        msg: >
+          .env file has been created from env.example.
+          Please edit it with your Proxmox configuration before running playbooks.
+      when: not env_file.stat.exists and example_file.stat.exists

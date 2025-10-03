@@ -1,0 +1,242 @@
+---
+# ============================================================================
+# llama.cpp Installation Tasks for Proxmox LXC Containers
+# ============================================================================
+# This tasks file installs llama.cpp from source inside each LXC container.
+# Controlled by the 'install_llama_cpp' variable (default: false).
+# 
+# To enable: export INSTALL_LLAMA_CPP=true
+# 
+# Optional configuration via environment variables:
+# - LLAMA_CPP_REPO_URL: Git repository URL (default: https://github.com/ggml-org/llama.cpp)
+# - LLAMA_CPP_VERSION: Branch/tag to checkout (default: master)
+# - LLAMA_CPP_INSTALL_DIR: Installation directory (default: /opt/llama.cpp)
+# - LLAMA_CPP_BUILD_TYPE: CMake build type (default: Release)
+# - LLAMA_CPP_ENABLE_CUBLAS: Enable CUDA/cuBLAS support (default: false)
+# - LLAMA_CPP_ENABLE_METAL: Enable Metal (Apple GPU) support (default: false)
+# - LLAMA_CPP_BUILD_SERVER: Build HTTP server binary (default: true)
+#
+# Example usage:
+#   export INSTALL_LLAMA_CPP=true
+#   export LLAMA_CPP_VERSION=b1234
+#   ansible-playbook playbook-proxmox-lxc.yml
+# ============================================================================
+
+- name: Install llama.cpp dependencies in containers
+  ansible.builtin.shell: |
+    ssh -p {{ proxmox_ssh_port }} {% if proxmox_ssh_key_path | length > 0 %}-i {{ proxmox_ssh_key_path }} {% endif %}-o StrictHostKeyChecking=no -o BatchMode=yes {{ proxmox_ssh_user }}@{{ proxmox_api_host }} bash -lc '
+      vmid="{{ item.vmid }}";
+      {{ 'sudo -n ' if proxmox_ssh_use_sudo else '' }}pct exec "$vmid" -- bash -c "
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        
+        # Update package lists
+        apt-get update -qq
+        
+        # Install build dependencies
+        apt-get install -y -qq \
+          git \
+          build-essential \
+          cmake \
+          libcurl4-openssl-dev \
+          pkg-config \
+          python3 \
+          python3-pip
+        
+        # Install CUDA toolkit if cuBLAS is enabled
+        {% if llama_cpp_enable_cublas %}
+        apt-get install -y -qq nvidia-cuda-toolkit || echo '\''CUDA toolkit installation skipped or failed'\''
+        {% endif %}
+        
+        echo '\''Dependencies installed successfully in container $vmid'\''
+      "'
+  args:
+    executable: /bin/bash
+  register: llama_deps_result
+  loop: "{{ ct_connection_info | default([]) }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  changed_when: "'Dependencies installed successfully' in llama_deps_result.stdout"
+  failed_when: llama_deps_result.rc != 0
+  when:
+    - not ansible_check_mode
+    - proxmox_credentials_present
+    - item.vmid is defined
+    - item.vmid | string | length > 0
+  tags: ['llama-cpp', 'dependencies']
+
+- name: Clone llama.cpp repository in containers
+  ansible.builtin.shell: |
+    ssh -p {{ proxmox_ssh_port }} {% if proxmox_ssh_key_path | length > 0 %}-i {{ proxmox_ssh_key_path }} {% endif %}-o StrictHostKeyChecking=no -o BatchMode=yes {{ proxmox_ssh_user }}@{{ proxmox_api_host }} bash -lc '
+      vmid="{{ item.vmid }}";
+      {{ 'sudo -n ' if proxmox_ssh_use_sudo else '' }}pct exec "$vmid" -- bash -c "
+        set -e
+        
+        # Remove existing directory if present
+        if [ -d '\''{{ llama_cpp_install_dir }}'\'' ]; then
+          echo '\''Removing existing llama.cpp directory'\''
+          rm -rf '\''{{ llama_cpp_install_dir }}'\''
+        fi
+        
+        # Create parent directory
+        mkdir -p '\''$(dirname {{ llama_cpp_install_dir }})'\''
+        
+        # Clone repository
+        echo '\''Cloning llama.cpp from {{ llama_cpp_repo_url }}'\''
+        git clone --depth 1 --branch {{ llama_cpp_version }} {{ llama_cpp_repo_url }} {{ llama_cpp_install_dir }}
+        
+        cd {{ llama_cpp_install_dir }}
+        
+        # Show current commit
+        echo '\''Cloned llama.cpp at commit:'\''
+        git log -1 --oneline
+        
+        echo '\''Repository cloned successfully in container $vmid'\''
+      "'
+  args:
+    executable: /bin/bash
+  register: llama_clone_result
+  loop: "{{ ct_connection_info | default([]) }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  changed_when: "'Repository cloned successfully' in llama_clone_result.stdout"
+  failed_when: llama_clone_result.rc != 0
+  when:
+    - not ansible_check_mode
+    - proxmox_credentials_present
+    - item.vmid is defined
+    - item.vmid | string | length > 0
+  tags: ['llama-cpp', 'clone']
+
+- name: Build llama.cpp in containers
+  ansible.builtin.shell: |
+    ssh -p {{ proxmox_ssh_port }} {% if proxmox_ssh_key_path | length > 0 %}-i {{ proxmox_ssh_key_path }} {% endif %}-o StrictHostKeyChecking=no -o BatchMode=yes {{ proxmox_ssh_user }}@{{ proxmox_api_host }} bash -lc '
+      vmid="{{ item.vmid }}";
+      {{ 'sudo -n ' if proxmox_ssh_use_sudo else '' }}pct exec "$vmid" -- bash -c "
+        set -e
+        cd {{ llama_cpp_install_dir }}
+        
+        # Create build directory
+        mkdir -p build
+        cd build
+        
+        # Configure CMake
+        echo '\''Configuring llama.cpp build'\''
+        cmake .. \
+          -DCMAKE_BUILD_TYPE={{ llama_cpp_build_type }} \
+          {% if llama_cpp_enable_cublas %}-DLLAMA_CUBLAS=ON{% else %}-DLLAMA_CUBLAS=OFF{% endif %} \
+          {% if llama_cpp_enable_metal %}-DLLAMA_METAL=ON{% else %}-DLLAMA_METAL=OFF{% endif %} \
+          {% if llama_cpp_build_server %}-DLLAMA_BUILD_SERVER=ON{% else %}-DLLAMA_BUILD_SERVER=OFF{% endif %} \
+          -DCMAKE_INSTALL_PREFIX=/usr/local
+        
+        # Build with all available cores
+        echo '\''Building llama.cpp (this may take several minutes)'\''
+        make -j\$(nproc)
+        
+        # Optional: Install binaries to /usr/local/bin
+        echo '\''Installing llama.cpp binaries'\''
+        make install || cp -f bin/* /usr/local/bin/ 2>/dev/null || true
+        
+        # Verify build
+        echo '\''Build verification:'\''
+        ls -lh {{ llama_cpp_install_dir }}/build/bin/ || ls -lh {{ llama_cpp_install_dir }}/build/
+        
+        # Show built binaries
+        echo '\''Built binaries:'\''
+        find {{ llama_cpp_install_dir }}/build -type f -executable -name '\''*'\'' | head -10
+        
+        echo '\''llama.cpp built successfully in container $vmid'\''
+      "'
+  args:
+    executable: /bin/bash
+  register: llama_build_result
+  loop: "{{ ct_connection_info | default([]) }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  changed_when: "'llama.cpp built successfully' in llama_build_result.stdout"
+  failed_when: llama_build_result.rc != 0
+  when:
+    - not ansible_check_mode
+    - proxmox_credentials_present
+    - item.vmid is defined
+    - item.vmid | string | length > 0
+  tags: ['llama-cpp', 'build']
+
+- name: Create llama.cpp usage instructions in containers
+  ansible.builtin.shell: |
+    ssh -p {{ proxmox_ssh_port }} {% if proxmox_ssh_key_path | length > 0 %}-i {{ proxmox_ssh_key_path }} {% endif %}-o StrictHostKeyChecking=no -o BatchMode=yes {{ proxmox_ssh_user }}@{{ proxmox_api_host }} bash -lc '
+      vmid="{{ item.vmid }}";
+      {{ 'sudo -n ' if proxmox_ssh_use_sudo else '' }}pct exec "$vmid" -- bash -c "
+        set -e
+        
+        cat > {{ llama_cpp_install_dir }}/USAGE.txt << 'EOF'
+        llama.cpp Installation Summary
+        ================================
+        
+        Installation Directory: {{ llama_cpp_install_dir }}
+        Build Type: {{ llama_cpp_build_type }}
+        CUDA/cuBLAS Support: {{ llama_cpp_enable_cublas }}
+        Metal Support: {{ llama_cpp_enable_metal }}
+        HTTP Server Built: {{ llama_cpp_build_server }}
+        
+        Quick Start:
+        ------------
+        1. Download a model (e.g., from Hugging Face):
+           cd {{ llama_cpp_install_dir }}
+           wget https://huggingface.co/TheBloke/Llama-2-7B-GGUF/resolve/main/llama-2-7b.Q4_K_M.gguf
+        
+        2. Run inference with the main binary:
+           {{ llama_cpp_install_dir }}/build/bin/main -m llama-2-7b.Q4_K_M.gguf -p \"Hello, world!\" -n 128
+        
+        3. Start HTTP server (if built):
+           {{ llama_cpp_install_dir }}/build/bin/server -m llama-2-7b.Q4_K_M.gguf --host 0.0.0.0 --port 8080
+        
+        Available Binaries:
+        -------------------
+        Main executable: {{ llama_cpp_install_dir }}/build/bin/main
+        Server: {{ llama_cpp_install_dir }}/build/bin/server
+        Quantization: {{ llama_cpp_install_dir }}/build/bin/quantize
+        
+        For more information:
+        ---------------------
+        Documentation: {{ llama_cpp_install_dir }}/README.md
+        Examples: {{ llama_cpp_install_dir }}/examples/
+        Repository: {{ llama_cpp_repo_url }}
+        EOF
+        
+        echo '\''Usage instructions created at {{ llama_cpp_install_dir }}/USAGE.txt'\''
+      "'
+  args:
+    executable: /bin/bash
+  register: llama_usage_result
+  loop: "{{ ct_connection_info | default([]) }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  changed_when: "'Usage instructions created' in llama_usage_result.stdout"
+  failed_when: llama_usage_result.rc != 0
+  when:
+    - not ansible_check_mode
+    - proxmox_credentials_present
+    - item.vmid is defined
+    - item.vmid | string | length > 0
+  tags: ['llama-cpp', 'documentation']
+
+- name: Print llama.cpp installation summary
+  ansible.builtin.debug:
+    msg: |
+      llama.cpp installed successfully in {{ item.hostname }}
+      - Installation directory: {{ llama_cpp_install_dir }}
+      - Version/Branch: {{ llama_cpp_version }}
+      - Build type: {{ llama_cpp_build_type }}
+      - Usage guide: {{ llama_cpp_install_dir }}/USAGE.txt
+      - Access container: ssh root@{{ item.ip }}
+      - Run example: {{ llama_cpp_install_dir }}/build/bin/main --help
+  loop: "{{ ct_connection_info | default([]) }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  when:
+    - not ansible_check_mode
+    - item.ip is defined
+    - item.ip | string | length > 0
+  tags: ['llama-cpp', 'summary']
+

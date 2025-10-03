@@ -1,0 +1,11 @@
+---
+# Playbook for running llama.cpp installation
+# Usage: ansible-playbook run-llama.yml [-e "env_file=custom.env"]
+
+- name: Import environment variables loader
+  ansible.builtin.import_playbook: load-env.yml
+  vars:
+    env_file: "{{ env_file | default('.env') }}"
+    target_playbook: "playbook-proxmox-lxc.yml"
+    target_tags: "llama-cpp"
+    install_llama_cpp: true

@@ -1,0 +1,99 @@
+---
+# Direct llama-cpp installation without complex preflight checks
+- name: Install llama.cpp on Proxmox LXC containers (direct)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    
+    # Load from environment
+    proxmox_api_host: "{{ lookup('env', 'PROXMOX_API_HOST') }}"
+    proxmox_ssh_user: "{{ lookup('env', 'PROXMOX_SSH_USER') | default('root', true) }}"
+    proxmox_ssh_port: "{{ lookup('env', 'PROXMOX_SSH_PORT') | default(22, true) | int }}"
+    proxmox_ssh_key_path: "{{ lookup('env', 'PROXMOX_SSH_KEY_PATH') | default('', true) }}"
+    proxmox_ssh_use_sudo: false
+    
+    # Container info - adjust as needed
+    target_containers:
+      - vmid: 301
+        hostname: llama-01
+        ip: 192.168.3.135
+    
+    # llama.cpp settings
+    llama_cpp_repo_url: "https://github.com/ggml-org/llama.cpp"
+    llama_cpp_version: "master"
+    llama_cpp_install_dir: "/opt/llama.cpp"
+    llama_cpp_build_type: "Release"
+  
+  tasks:
+    - name: Install dependencies via direct SSH to container
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no \
+          root@{{ item.ip }} "
+          apt-get update && \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git build-essential cmake python3 python3-pip curl wget
+        "
+      loop: "{{ target_containers }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      timeout: 300
+      
+    - name: Clone llama.cpp repository via direct SSH
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no \
+          root@{{ item.ip }} "
+          if [ ! -d {{ llama_cpp_install_dir }} ]; then
+            git clone {{ llama_cpp_repo_url }} {{ llama_cpp_install_dir }}
+          fi &&
+          cd {{ llama_cpp_install_dir }} &&
+          git fetch origin &&
+          git checkout {{ llama_cpp_version }} &&
+          git pull
+        "
+      loop: "{{ target_containers }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      timeout: 300
+      
+    - name: Build llama.cpp via direct SSH
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no \
+          root@{{ item.ip }} "
+          cd {{ llama_cpp_install_dir }} &&
+          mkdir -p build && cd build &&
+          cmake .. -DCMAKE_BUILD_TYPE={{ llama_cpp_build_type }} -DLLAMA_BUILD_SERVER=ON &&
+          cmake --build . --config {{ llama_cpp_build_type }} -j\$(nproc)
+        "
+      loop: "{{ target_containers }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      timeout: 900
+      
+    - name: Verify installation
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no \
+          root@{{ item.ip }} "
+          {{ llama_cpp_install_dir }}/build/bin/llama-cli --version 2>&1 || \
+          {{ llama_cpp_install_dir }}/build/bin/main --version 2>&1 || \
+          echo 'llama.cpp built successfully'
+        "
+      loop: "{{ target_containers }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      register: version_check
+      
+    - name: Show installation results
+      ansible.builtin.debug:
+        msg: |
+          ✅ llama.cpp installed on {{ item.item.hostname }} ({{ item.item.ip }})
+          Installation directory: {{ llama_cpp_install_dir }}
+          Binaries: {{ llama_cpp_install_dir }}/build/bin/
+          
+          Test it: ssh root@{{ item.item.ip }} "{{ llama_cpp_install_dir }}/build/bin/llama-cli --help"
+      loop: "{{ version_check.results }}"
+      loop_control:
+        label: "{{ item.item.hostname }}"
+

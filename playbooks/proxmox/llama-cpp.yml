@@ -1,0 +1,90 @@
+---
+# Wrapper playbook to load .env and execute llama-cpp installation on Proxmox LXC
+# Usage: ansible-playbook playbooks/proxmox/llama-cpp.yml
+# Optional: ansible-playbook playbooks/proxmox/llama-cpp.yml -e "env_file=.env.custom"
+
+- name: Load environment and run llama-cpp installation on Proxmox LXC
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars:
+    env_file_path: "{{ env_file | default('.env') }}"
+    target_playbook: playbooks/proxmox/llama-cpp-main.yml
+    target_tags: llama-cpp
+  
+  tasks:
+    - name: Check if .env file exists
+      ansible.builtin.stat:
+        path: "{{ env_file_path }}"
+      register: env_file_stat
+    
+    - name: Fail if .env file doesn't exist
+      ansible.builtin.fail:
+        msg: |
+          {{ env_file_path }} not found. 
+          Create it from env.example and set Proxmox credentials:
+            cp env.example {{ env_file_path }}
+            # Edit {{ env_file_path }} with your Proxmox API credentials
+      when: not env_file_stat.stat.exists
+    
+    - name: Read .env file
+      ansible.builtin.slurp:
+        src: "{{ env_file_path }}"
+      register: env_file_content
+    
+    - name: Parse environment variables
+      ansible.builtin.set_fact:
+        env_vars: {}
+    
+    - name: Build environment variables dict
+      ansible.builtin.set_fact:
+        env_vars: >-
+          {{ env_vars | combine({
+            (item.split('=')[0] | trim): (item.split('=', 1)[1] | trim | regex_replace('^["\']|["\']$', ''))
+          }) }}
+      loop: "{{ (env_file_content.content | b64decode).split('\n') }}"
+      when:
+        - item | trim != ''
+        - not (item | trim | regex_search('^#'))
+        - item is search('=')
+    
+    - name: Validate Proxmox credentials
+      ansible.builtin.assert:
+        that:
+          - env_vars.PROXMOX_API_HOST is defined
+          - (env_vars.PROXMOX_API_TOKEN_ID is defined and env_vars.PROXMOX_API_TOKEN_SECRET is defined) or
+            (env_vars.PROXMOX_API_USER is defined and env_vars.PROXMOX_API_PASSWORD is defined)
+        fail_msg: |
+          Missing required Proxmox credentials in {{ env_file_path }}.
+          Required: PROXMOX_API_HOST and either:
+            - PROXMOX_API_TOKEN_ID + PROXMOX_API_TOKEN_SECRET (token auth)
+            - PROXMOX_API_USER + PROXMOX_API_PASSWORD (password auth)
+        success_msg: "✓ Proxmox credentials validated"
+    
+    - name: Enable llama-cpp installation
+      ansible.builtin.set_fact:
+        env_vars: "{{ env_vars | combine({'INSTALL_LLAMA_CPP': 'true'}) }}"
+    
+    - name: Show execution plan
+      ansible.builtin.debug:
+        msg: |
+          Executing: ansible-playbook {{ target_playbook }} --tags {{ target_tags }}
+          Proxmox Host: {{ env_vars.PROXMOX_API_HOST }}
+          Proxmox Node: {{ env_vars.PROXMOX_NODE | default('pve') }}
+    
+    - name: Set environment variables for child playbook
+      ansible.builtin.set_fact:
+        child_env: "{{ env_vars }}"
+    
+    - name: Execute llama-cpp installation playbook
+      ansible.builtin.command:
+        cmd: ansible-playbook {{ target_playbook }} --tags {{ target_tags }}
+      environment: "{{ child_env }}"
+      register: playbook_result
+      changed_when: false
+    
+    - name: Show playbook results
+      ansible.builtin.debug:
+        var: playbook_result.stdout_lines
+      when: playbook_result.stdout_lines is defined

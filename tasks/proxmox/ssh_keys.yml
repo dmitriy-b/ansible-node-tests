@@ -1,0 +1,25 @@
+---
+# SSH key setup for containers
+
+- name: Locate local SSH public key for containers (auto)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ lookup('env','HOME') + '/.ssh/id_ed25519.pub' }}"
+    - "{{ lookup('env','HOME') + '/.ssh/id_rsa.pub' }}"
+  register: ssh_key_stats
+  when: (lookup('env','CT_SSH_AUTHORIZED_KEYS') | default('', true) | trim | length) == 0
+  tags: ['ssh-keys']
+
+- name: Read first found SSH public key
+  ansible.builtin.slurp:
+    path: "{{ (ssh_key_stats.results | selectattr('stat.exists', 'equalto', true) | map(attribute='item') | list)[0] }}"
+  register: fallback_pubkey_content
+  when: (lookup('env','CT_SSH_AUTHORIZED_KEYS') | default('', true) | trim | length) == 0 and (ssh_key_stats.results | selectattr('stat.exists','equalto', true) | list | length) > 0
+  tags: ['ssh-keys']
+
+- name: Use local SSH public key for containers
+  ansible.builtin.set_fact:
+    ct_pubkey: "{{ (fallback_pubkey_content.content | b64decode) | trim }}"
+  when: (lookup('env','CT_SSH_AUTHORIZED_KEYS') | default('', true) | trim | length) == 0 and fallback_pubkey_content is defined
+  tags: ['ssh-keys']

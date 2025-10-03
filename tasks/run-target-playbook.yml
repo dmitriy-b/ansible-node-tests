@@ -1,0 +1,35 @@
+---
+# Task file to run a target playbook with environment variables
+# This is included by load-env.yml
+
+- name: Set environment variables from .env for ansible-playbook command
+  ansible.builtin.set_fact:
+    env_options: ""
+
+- name: Build environment variable options
+  ansible.builtin.set_fact:
+    env_options: "{{ env_options }} {{ item.key }}={{ item.value }}"
+  loop: "{{ env_vars | dict2items }}"
+  when: item.value | length > 0
+
+- name: Set INSTALL_LLAMA_CPP if needed
+  ansible.builtin.set_fact:
+    env_options: "{{ env_options }} INSTALL_LLAMA_CPP=true"
+  when: install_llama_cpp | bool
+
+- name: Prepare ansible-playbook command
+  ansible.builtin.set_fact:
+    ansible_command: "ansible-playbook {{ playbook_to_run }} {{ tags_to_use | length > 0 | ternary('--tags ' + tags_to_use, '') }}"
+
+- name: Show command to be executed
+  ansible.builtin.debug:
+    msg: "Running: env {{ env_options }} {{ ansible_command }}"
+
+- name: Run target playbook with environment variables
+  ansible.builtin.shell: "env {{ env_options }} {{ ansible_command }}"
+  register: playbook_result
+  changed_when: false
+
+- name: Show playbook output
+  ansible.builtin.debug:
+    var: playbook_result.stdout_lines

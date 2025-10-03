@@ -1,0 +1,30 @@
+---
+# Tasks for running playbooks with environment variables
+# This file should be included from a playbook, not run directly
+
+- name: Check if .env file exists
+  stat:
+    path: "{{ playbook_dir }}/.env"
+  register: env_file
+
+- name: Create .env from env.example if needed
+  copy:
+    src: "{{ playbook_dir }}/env.example"
+    dest: "{{ playbook_dir }}/.env"
+    mode: '0600'
+  when: not env_file.stat.exists
+
+- name: Build command with tags if specified
+  set_fact:
+    playbook_cmd: >-
+      ansible-playbook {{ target_playbook }}
+      {{ (target_tags | string | trim != '') | ternary('--tags ' + target_tags, '') }}
+
+- name: Run the target playbook with environment variables
+  shell: "{% if (env_vars | string | trim != '') %}export {{ env_vars }} && {% endif %}{{ playbook_cmd }}"
+  register: result
+  changed_when: false
+
+- name: Show result
+  debug:
+    var: result.stdout_lines

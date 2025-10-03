@@ -1,0 +1,43 @@
+---
+# Playbook to check for .env file and create one from env.example if needed
+# Usage: ansible-playbook create-env-file.yml [-e "env_file=.env example_file=env.example"]
+
+- name: Check and create .env file
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars:
+    env_file: "{{ env_file | default('.env') }}"
+    example_file: "{{ example_file | default('env.example') }}"
+  
+  tasks:
+    - name: Check if .env file exists
+      ansible.builtin.stat:
+        path: "{{ env_file }}"
+      register: env_file_stat
+    
+    - name: Check if example file exists
+      ansible.builtin.stat:
+        path: "{{ example_file }}"
+      register: example_file_stat
+      when: not env_file_stat.stat.exists
+    
+    - name: Fail if example file doesn't exist
+      ansible.builtin.fail:
+        msg: "Neither {{ env_file }} nor {{ example_file }} exist. Cannot create environment file."
+      when: not env_file_stat.stat.exists and not example_file_stat.stat.exists
+    
+    - name: Copy example file to .env
+      ansible.builtin.copy:
+        src: "{{ example_file }}"
+        dest: "{{ env_file }}"
+        mode: '0600'
+      when: not env_file_stat.stat.exists
+    
+    - name: Notify user
+      ansible.builtin.debug:
+        msg: >
+          {{ env_file }} has been created from {{ example_file }}.
+          Please edit it with your Proxmox configuration before running playbooks.
+      when: not env_file_stat.stat.exists

@@ -1,0 +1,30 @@
+---
+# Simplified playbook for running llama.cpp tasks using direct command
+# Usage: ansible-playbook run-llama-ansible.yml
+
+- name: Run llama.cpp installation tasks
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  tasks:
+    - name: Check if .env file exists
+      stat:
+        path: .env
+      register: env_file
+    
+    - name: Create .env from env.example if needed
+      copy:
+        src: env.example
+        dest: .env
+        mode: '0600'
+      when: not env_file.stat.exists
+      
+    - name: Run the playbook with llama-cpp tag
+      shell: "export INSTALL_LLAMA_CPP=true && ansible-playbook playbook-proxmox-lxc.yml --tags llama-cpp"
+      register: result
+      changed_when: false
+    
+    - name: Show result
+      debug:
+        var: result.stdout_lines

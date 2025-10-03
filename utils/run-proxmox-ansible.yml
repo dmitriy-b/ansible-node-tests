@@ -1,0 +1,15 @@
+---
+# General-purpose playbook for running Proxmox tasks
+# Usage examples:
+#   ansible-playbook run-proxmox-ansible.yml
+#   ansible-playbook run-proxmox-ansible.yml -e "target_playbook=playbook-proxmox.yml"
+#   ansible-playbook run-proxmox-ansible.yml -e "target_tags=create,start"
+#   ansible-playbook run-proxmox-ansible.yml -e "install_llama_cpp=true"
+
+- name: Import environment variables loader
+  ansible.builtin.import_playbook: load-env.yml
+  vars:
+    env_file: "{{ env_file | default('.env') }}"
+    target_playbook: "{{ target_playbook | default('playbook-proxmox-lxc.yml') }}"
+    target_tags: "{{ target_tags | default('') }}"
+    install_llama_cpp: "{{ install_llama_cpp | default(false) | bool }}"

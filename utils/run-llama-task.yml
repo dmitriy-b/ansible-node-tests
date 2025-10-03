@@ -1,0 +1,10 @@
+---
+# Specialized playbook for running llama.cpp tasks
+# Usage: ansible-playbook run-llama-task.yml
+
+- name: Run llama.cpp installation
+  import_playbook: run-ansible.yml
+  vars:
+    target_playbook: "playbook-proxmox-lxc.yml"
+    target_tags: "llama-cpp"
+    env_vars: "INSTALL_LLAMA_CPP=true"

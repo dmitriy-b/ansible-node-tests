@@ -1,0 +1,80 @@
+---
+# Playbook for loading a .env file and running a target playbook
+# Usage: ansible-playbook run-with-env.yml -e "playbook=playbook-proxmox-lxc.yml tag_list=llama-cpp"
+
+- name: Load environment variables and run a playbook
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars:
+    playbook: "{{ playbook | default('playbook-proxmox-lxc.yml') }}"
+    tag_list: "{{ tag_list | default('') }}"
+    enable_llama_cpp: "{{ enable_llama_cpp | default(false) | bool }}"
+  
+  tasks:
+    - name: Check if .env file exists
+      stat:
+        path: .env
+      register: env_file
+    
+    - name: Create .env from env.example if needed
+      include_tasks: setup-env.yml
+      when: not env_file.stat.exists
+    
+    - name: Read .env file
+      command: cat .env
+      register: env_file_content
+      changed_when: false
+    
+    - name: Parse environment variables
+      set_fact:
+        env_vars: {}
+    
+    - name: Process each line
+      set_fact:
+        env_vars: >-
+          {{ env_vars | combine({
+            item.split('=')[0]: (item.split('=')[1:] | join('='))
+          }) }}
+      with_items: "{{ env_file_content.stdout_lines }}"
+      when: item | trim != '' and not item.startswith('#') and '=' in item
+    
+    - name: Set INSTALL_LLAMA_CPP if enabled
+      set_fact:
+        env_vars: "{{ env_vars | combine({'INSTALL_LLAMA_CPP': 'true'}) }}"
+      when: enable_llama_cpp
+    
+    - name: Create environment file for running playbook
+      copy:
+        dest: "{{ playbook_dir }}/temp_env_vars.sh"
+        content: |
+          #!/bin/bash
+          {% for key, value in env_vars.items() %}
+          export {{ key }}={{ value }}
+          {% endfor %}
+        mode: '0755'
+      register: env_file_created
+    
+    - name: Build ansible command
+      set_fact:
+        ansible_cmd: "ansible-playbook {{ playbook }} {{ (tag_list | string | length > 0) | ternary('--tags ' + tag_list | string, '') }}"
+    
+    - name: Show command to be executed
+      debug:
+        msg: "Running: source {{ playbook_dir }}/temp_env_vars.sh && {{ ansible_cmd }}"
+    
+    - name: Run target playbook with environment variables
+      shell: "source {{ playbook_dir }}/temp_env_vars.sh && {{ ansible_cmd }}"
+      register: playbook_result
+      changed_when: false
+    
+    - name: Show playbook output
+      debug:
+        var: playbook_result.stdout_lines
+        
+    - name: Remove temporary environment file
+      file:
+        path: "{{ playbook_dir }}/temp_env_vars.sh"
+        state: absent
+      changed_when: false

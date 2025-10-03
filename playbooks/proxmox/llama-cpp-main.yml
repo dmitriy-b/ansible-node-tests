@@ -1,0 +1,83 @@
+---
+# llama-cpp Installation Playbook for Proxmox LXC
+# ==============================================
+# This playbook handles llama-cpp installation on Proxmox LXC containers
+# It includes:
+# 1. VM readiness checks
+# 2. llama-cpp installation tasks
+
+- name: Ensure Proxmox LXC containers are ready and install llama-cpp
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  collections:
+    - community.general
+
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    # API/Secrets
+    proxmox_api_host: "{{ lookup('env', 'PROXMOX_API_HOST') | default(omit) }}"
+    proxmox_api_port: "{{ (lookup('env', 'PROXMOX_API_PORT') | default(8006, true)) | int }}"
+    proxmox_validate_certs: "{{ (lookup('env', 'PROXMOX_VALIDATE_CERTS') | default(true, true)) | bool }}"
+
+    proxmox_api_token_id: "{{ lookup('env', 'PROXMOX_API_TOKEN_ID') | default(omit) }}"      # e.g. user@pve!ci OR ci
+    proxmox_api_token_secret: "{{ lookup('env', 'PROXMOX_API_TOKEN_SECRET') | default(omit) }}"
+
+    proxmox_api_user: "{{ lookup('env', 'PROXMOX_API_USER') | default(omit) }}"              # e.g. user@pve
+    proxmox_api_password: "{{ lookup('env', 'PROXMOX_API_PASSWORD') | default(omit) }}"
+
+    # Derived auth
+    proxmox_token_has_user: "{{ proxmox_api_token_id is defined and ('!' in proxmox_api_token_id) }}"
+    proxmox_token_user_part: "{{ proxmox_api_token_id.split('!')[0] if proxmox_token_has_user else omit }}"
+    proxmox_token_name: "{{ proxmox_api_token_id.split('!')[1] if proxmox_token_has_user else proxmox_api_token_id if proxmox_api_token_id is defined else omit }}"
+
+    proxmox_effective_user: "{{ proxmox_api_user if proxmox_api_user is defined else (proxmox_token_user_part if proxmox_token_has_user else omit) }}"
+    proxmox_use_password_auth: "{{ proxmox_api_password is defined and proxmox_effective_user is defined }}"
+    proxmox_use_token_auth: "{{ proxmox_token_name is defined and proxmox_api_token_secret is defined and proxmox_effective_user is defined }}"
+    proxmox_credentials_present: "{{ proxmox_api_host is defined and (proxmox_use_token_auth or proxmox_use_password_auth) }}"
+
+    # Core params
+    proxmox_node: "{{ lookup('env', 'PROXMOX_NODE') | default('pve', true) }}"
+    proxmox_storage: "{{ lookup('env', 'PROXMOX_STORAGE') | default('local-lvm', true) }}"
+
+    # Container matrix (array of CT specs)
+    proxmox_cts: |
+      {{
+        lookup('env', 'PROXMOX_CTS_JSON')
+        | default('[{"hostname":"llama-01","vmid":301,"cores":4,"memory":8192,"disk_gb":40,"ip":"dhcp","net_bridge":"vmbr0"}]', true)
+      }}
+
+    # Optional SSH to Proxmox host for IP discovery and exec commands
+    proxmox_fetch_ip_via_ssh: "{{ (lookup('env','PROXMOX_FETCH_IP_VIA_SSH') | default(true, true)) | bool }}"
+    proxmox_ssh_user: "{{ lookup('env', 'PROXMOX_SSH_USER') | default('root', true) }}"
+    proxmox_ssh_port: "{{ (lookup('env', 'PROXMOX_SSH_PORT') | default(22, true)) | int }}"
+    proxmox_ssh_key_path: "{{ lookup('env', 'PROXMOX_SSH_KEY_PATH') | default('', true) }}"
+    proxmox_ssh_use_sudo: "{{ (lookup('env', 'PROXMOX_SSH_USE_SUDO') | default(proxmox_ssh_user != 'root', true)) | bool }}"
+
+    # Set default for installation
+    install_llama_cpp: true
+
+  module_defaults:
+    community.general.proxmox:
+      api_host: "{{ proxmox_api_host }}"
+      api_port: "{{ proxmox_api_port }}"
+      validate_certs: "{{ proxmox_validate_certs }}"
+      api_user: "{{ proxmox_effective_user }}"
+      api_password: "{{ proxmox_api_password if proxmox_use_password_auth else omit }}"
+      api_token_id: "{{ proxmox_token_name if proxmox_use_token_auth else omit }}"
+      api_token_secret: "{{ proxmox_api_token_secret if proxmox_use_token_auth else omit }}"
+
+  tasks:
+    # VM Readiness
+    - name: Include VM readiness checks
+      ansible.builtin.import_tasks: ../../tasks/features/llama-cpp/vm_readiness.yml
+      tags: ['llama-cpp', 'preflight']
+
+    # llama.cpp Installation
+    - name: Include llama.cpp installation tasks
+      ansible.builtin.include_tasks:
+        file: ../../tasks/features/llama-cpp/install.yml
+      when:
+        - install_llama_cpp
+      tags: ['llama-cpp']

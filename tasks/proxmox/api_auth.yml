@@ -1,0 +1,36 @@
+---
+# Proxmox API authentication
+
+- name: Login to Proxmox API (password auth) to get ticket
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ proxmox_api_base_url }}/access/ticket"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      username: "{{ proxmox_effective_user }}"
+      password: "{{ proxmox_api_password }}"
+    return_content: true
+    status_code: 200
+    validate_certs: "{{ proxmox_validate_certs }}"
+  register: proxmox_login
+  failed_when: false
+  when:
+    - proxmox_fetch_ip_via_api
+    - proxmox_credentials_present
+    - proxmox_use_password_auth
+  tags: ['auth']
+
+- name: Build Proxmox API auth headers
+  no_log: true
+  ansible.builtin.set_fact:
+    proxmox_api_auth_headers: >-
+      {{
+        ({ 'Authorization': 'PVEAPIToken=' ~ proxmox_effective_user ~ '!' ~ proxmox_token_name ~ '=' ~ proxmox_api_token_secret })
+        if proxmox_use_token_auth else
+        ({ 'Cookie': 'PVEAuthCookie=' ~ (proxmox_login.json.data.ticket | default('')), 'CSRFPreventionToken': (proxmox_login.json.data.CSRFPreventionToken | default('')) })
+      }}
+  when:
+    - proxmox_fetch_ip_via_api
+    - proxmox_credentials_present
+  tags: ['auth']

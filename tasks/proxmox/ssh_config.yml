@@ -1,0 +1,13 @@
+---
+# Configure SSH command base for Proxmox
+
+- name: Build SSH argv base for remote commands
+  ansible.builtin.set_fact:
+    ssh_argv_base: >-
+      {{
+        ['ssh','-p', (proxmox_ssh_port | string)]
+        + ((proxmox_ssh_key_path | default('') | length > 0) | ternary(['-i', proxmox_ssh_key_path], []))
+        + ['-o','StrictHostKeyChecking=no','-o','BatchMode=yes', proxmox_ssh_user ~ '@' ~ proxmox_api_host, 'bash','-lc']
+      }}
+  when: proxmox_fetch_ip_via_ssh
+  tags: ['ip']

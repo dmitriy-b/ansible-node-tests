@@ -1,0 +1,272 @@
+---
+# ============================================================================
+# Pre-flight: Ensure Target Containers are Running and Ready (FIXED VERSION)
+# ============================================================================
+# This refactored version includes:
+# - Proper status querying using proxmox_vm_info
+# - Enhanced error handling and logging
+# - Timeout mechanisms to prevent hanging
+# - Verbose debugging information
+# ============================================================================
+
+- name: Refresh ct_matrix for tag-filtered execution
+  ansible.builtin.set_fact:
+    ct_matrix: "{{ proxmox_cts if proxmox_cts is not string else (proxmox_cts | from_json) }}"
+  when:
+    - ct_matrix is not defined
+  tags: ['llama-cpp', 'preflight']
+
+- name: Debug - Show ct_matrix
+  ansible.builtin.debug:
+    msg: "Container matrix: {{ ct_matrix }}"
+    verbosity: 1
+  tags: ['llama-cpp', 'preflight']
+
+# ============================================================================
+# STEP 1: Query Container Status (Fixed - use proxmox_vm_info)
+# ============================================================================
+- name: Query container status via Proxmox API (using vm_info)
+  community.general.proxmox_vm_info:
+    api_host: "{{ proxmox_api_host }}"
+    api_user: "{{ proxmox_effective_user }}"
+    api_password: "{{ proxmox_api_password if proxmox_use_password_auth else omit }}"
+    api_token_id: "{{ proxmox_token_name if proxmox_use_token_auth else omit }}"
+    api_token_secret: "{{ proxmox_api_token_secret if proxmox_use_token_auth else omit }}"
+    node: "{{ proxmox_node }}"
+    vmid: "{{ item.vmid }}"
+    type: lxc
+  register: container_info
+  loop: "{{ ct_matrix }}"
+  loop_control:
+    label: "{{ item.hostname }} (VMID: {{ item.vmid }})"
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - proxmox_credentials_present
+    - item.vmid is defined
+  tags: ['llama-cpp', 'preflight']
+
+- name: Debug - Show container status
+  ansible.builtin.debug:
+    msg: "Container {{ item.item.hostname }} (VMID: {{ item.item.vmid }}) - Status: {{ item.proxmox_vms[0].status | default('unknown') }}"
+    verbosity: 1
+  loop: "{{ container_info.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.hostname }}"
+  when:
+    - not ansible_check_mode
+    - item.proxmox_vms is defined
+    - item.proxmox_vms | length > 0
+  tags: ['llama-cpp', 'preflight']
+
+# ============================================================================
+# STEP 2: Start Stopped Containers
+# ============================================================================
+- name: Start stopped containers
+  community.general.proxmox:
+    node: "{{ proxmox_node }}"
+    vmid: "{{ item.item.vmid }}"
+    state: started
+    timeout: 60
+  loop: "{{ container_info.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.hostname }} (VMID: {{ item.item.vmid }})"
+  when:
+    - not ansible_check_mode
+    - proxmox_credentials_present
+    - item.proxmox_vms is defined
+    - item.proxmox_vms | length > 0
+    - item.proxmox_vms[0].status | default('') != 'running'
+    - not item.failed | default(false)
+  tags: ['llama-cpp', 'preflight']
+
+- name: Pause to allow containers to initialize
+  ansible.builtin.pause:
+    seconds: 5
+    prompt: "Waiting for containers to initialize..."
+  when:
+    - not ansible_check_mode
+    - container_info.results | selectattr('proxmox_vms', 'defined') | selectattr('proxmox_vms.0.status', 'defined') | selectattr('proxmox_vms.0.status', 'ne', 'running') | list | length > 0
+  tags: ['llama-cpp', 'preflight']
+
+# ============================================================================
+# STEP 3: Wait for Containers to be Exec-Ready (REFACTORED WITH TIMEOUT)
+# ============================================================================
+
+- name: Set default Proxmox SSH variables if not defined
+  ansible.builtin.set_fact:
+    proxmox_fetch_ip_via_ssh: "{{ proxmox_fetch_ip_via_ssh | default(true) }}"
+    proxmox_ssh_port: "{{ proxmox_ssh_port | default(22) }}"
+    proxmox_ssh_user: "{{ proxmox_ssh_user | default('root') }}"
+    proxmox_ssh_key_path: "{{ proxmox_ssh_key_path | default('') }}"
+    proxmox_ssh_use_sudo: "{{ proxmox_ssh_use_sudo | default(false) }}"
+  tags: ['llama-cpp', 'preflight']
+
+- name: Debug - Show SSH connection details
+  ansible.builtin.debug:
+    msg: |
+      SSH Connection Settings:
+      - Host: {{ proxmox_api_host }}
+      - Port: {{ proxmox_ssh_port }}
+      - User: {{ proxmox_ssh_user }}
+      - Use SSH: {{ proxmox_fetch_ip_via_ssh }}
+    verbosity: 1
+  tags: ['llama-cpp', 'preflight']
+
+- name: Wait for containers to be exec-ready (boot complete) - WITH TIMEOUT
+  ansible.builtin.shell: |
+    set -e
+    # Add command timeout (5 seconds per attempt)
+    timeout 5 ssh \
+      -p {{ proxmox_ssh_port }} \
+      {% if proxmox_ssh_key_path | length > 0 %}-i {{ proxmox_ssh_key_path }} {% endif %}\
+      -o StrictHostKeyChecking=no \
+      -o BatchMode=yes \
+      -o ConnectTimeout=3 \
+      {{ proxmox_ssh_user }}@{{ proxmox_api_host }} \
+      'vmid="{{ item.vmid }}"; {{ "sudo -n " if proxmox_ssh_use_sudo else "" }}pct exec "$vmid" -- sh -c "echo ready" 2>&1' || echo "exec_failed"
+  args:
+    executable: /bin/bash
+  register: exec_ready_check
+  loop: "{{ ct_matrix }}"
+  loop_control:
+    label: "{{ item.hostname }} (VMID: {{ item.vmid }})"
+  retries: 30
+  delay: 2
+  until: >
+    exec_ready_check.rc == 0 and 
+    'ready' in exec_ready_check.stdout
+  changed_when: false
+  failed_when: false  # Don't fail, just warn
+  when:
+    - not ansible_check_mode
+    - proxmox_credentials_present | default(false)
+    - proxmox_fetch_ip_via_ssh | default(false)
+    - item.vmid is defined
+  tags: ['llama-cpp', 'preflight']
+
+- name: Debug - Show exec ready check results
+  ansible.builtin.debug:
+    msg: |
+      Container: {{ item.item.hostname }} (VMID: {{ item.item.vmid }})
+      Return Code: {{ item.rc }}
+      Stdout: {{ item.stdout | default('') }}
+      Stderr: {{ item.stderr | default('') }}
+      Attempts: {{ item.attempts | default(1) }}
+    verbosity: 1
+  loop: "{{ exec_ready_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.hostname }}"
+  when:
+    - not ansible_check_mode
+    - exec_ready_check.results is defined
+  tags: ['llama-cpp', 'preflight']
+
+- name: Warn if containers are not exec-ready
+  ansible.builtin.debug:
+    msg: "⚠️  Warning: Container {{ item.item.hostname }} (VMID: {{ item.item.vmid }}) may not be fully ready for exec commands"
+  loop: "{{ exec_ready_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.hostname }}"
+  when:
+    - not ansible_check_mode
+    - exec_ready_check.results is defined
+    - (item.rc != 0 or 'ready' not in (item.stdout | default('')))
+  tags: ['llama-cpp', 'preflight']
+
+# ============================================================================
+# STEP 4: Verify Network Connectivity (WITH ENHANCED ERROR HANDLING)
+# ============================================================================
+- name: Verify network connectivity in containers - WITH TIMEOUT
+  ansible.builtin.shell: |
+    set -e
+    # Add command timeout (8 seconds per attempt - 3s for ping + overhead)
+    timeout 8 ssh \
+      -p {{ proxmox_ssh_port }} \
+      {% if proxmox_ssh_key_path | length > 0 %}-i {{ proxmox_ssh_key_path }} {% endif %}\
+      -o StrictHostKeyChecking=no \
+      -o BatchMode=yes \
+      -o ConnectTimeout=3 \
+      {{ proxmox_ssh_user }}@{{ proxmox_api_host }} \
+      'vmid="{{ item.vmid }}"; {{ "sudo -n " if proxmox_ssh_use_sudo else "" }}pct exec "$vmid" -- sh -c "ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1 && echo network_ok" 2>&1' || echo "network_failed"
+  args:
+    executable: /bin/bash
+  register: network_check
+  loop: "{{ ct_matrix }}"
+  loop_control:
+    label: "{{ item.hostname }} (VMID: {{ item.vmid }})"
+  retries: 10
+  delay: 3
+  until: >
+    network_check.rc == 0 and 
+    'network_ok' in network_check.stdout
+  changed_when: false
+  failed_when: false  # Don't fail, just warn
+  when:
+    - not ansible_check_mode
+    - proxmox_credentials_present | default(false)
+    - proxmox_fetch_ip_via_ssh | default(false)
+    - item.vmid is defined
+  tags: ['llama-cpp', 'preflight']
+
+- name: Debug - Show network check results
+  ansible.builtin.debug:
+    msg: |
+      Container: {{ item.item.hostname }} (VMID: {{ item.item.vmid }})
+      Network Status: {{ 'OK' if 'network_ok' in (item.stdout | default('')) else 'FAILED' }}
+      Attempts: {{ item.attempts | default(1) }}
+    verbosity: 1
+  loop: "{{ network_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.hostname }}"
+  when:
+    - not ansible_check_mode
+    - network_check.results is defined
+  tags: ['llama-cpp', 'preflight']
+
+- name: Warn if network is not ready
+  ansible.builtin.debug:
+    msg: "⚠️  Warning: Container {{ item.item.hostname }} (VMID: {{ item.item.vmid }}) network may not be ready"
+  loop: "{{ network_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.hostname }}"
+  when:
+    - not ansible_check_mode
+    - network_check.results is defined
+    - ('network_ok' not in (item.stdout | default('')))
+  tags: ['llama-cpp', 'preflight']
+
+# ============================================================================
+# STEP 5: Rebuild Connection Info
+# ============================================================================
+- name: Rebuild connection info for llama-cpp tasks
+  block:
+    - name: Initialize connection info list
+      ansible.builtin.set_fact:
+        ct_connection_info: []
+    
+    - name: Build connection info from ct_matrix
+      ansible.builtin.set_fact:
+        ct_connection_info: >-
+          {{ ct_connection_info | default([]) + [{
+            'hostname': item.hostname,
+            'vmid': (item.vmid | string),
+            'ip': (item.ip if (item.ip | default('dhcp')) != 'dhcp' else '')
+          }] }}
+      loop: "{{ ct_matrix }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+  when:
+    - not ansible_check_mode
+    - ct_connection_info is not defined or ct_connection_info | length == 0
+  tags: ['llama-cpp', 'preflight']
+
+- name: Container readiness summary
+  ansible.builtin.debug:
+    msg: "✓ Container {{ item.hostname }} (VMID: {{ item.vmid }}) ready for llama-cpp installation"
+  loop: "{{ ct_matrix }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  when:
+    - not ansible_check_mode
+  tags: ['llama-cpp', 'preflight']

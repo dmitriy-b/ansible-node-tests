@@ -1,0 +1,69 @@
+---
+# This playbook reads a .env file and loads environment variables for other playbooks to use
+# Usage: ansible-playbook load-env.yml -e "env_file=.env target_playbook=playbook-proxmox-lxc.yml target_tags=llama-cpp"
+
+- name: Ensure .env file exists
+  ansible.builtin.import_playbook: create-env-file.yml
+  vars:
+    env_file: "{{ env_file | default('.env') }}"
+    example_file: "{{ example_file | default('env.example') }}"
+
+- name: Load environment variables and run target playbook
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars:
+    # Default values (can be overridden with -e)
+    env_file: "{{ env_file | default('.env') }}"
+    target_playbook: "{{ target_playbook | default('playbook-proxmox-lxc.yml') }}"
+    target_tags: "{{ target_tags | default('') }}"
+    install_llama_cpp: "{{ install_llama_cpp | default(false) | bool }}"
+    
+  tasks:
+    - name: Check if .env file exists
+      ansible.builtin.stat:
+        path: "{{ env_file }}"
+      register: env_file_stat
+      
+    - name: Fail if .env file doesn't exist
+      ansible.builtin.fail:
+        msg: "{{ env_file }} does not exist. Please create it from env.example first."
+      when: not env_file_stat.stat.exists
+      
+    - name: Read .env file
+      ansible.builtin.slurp:
+        src: "{{ env_file }}"
+      register: env_file_content
+      
+    - name: Parse .env file and set variables
+      ansible.builtin.set_fact:
+        env_vars: "{{ {} }}"
+      
+    - name: Process each line in the .env file
+      ansible.builtin.set_fact:
+        env_vars: >-
+          {{ env_vars | combine({
+            (item.split('=')[0] | trim): (item.split('=')[1:] | join('=') | trim)
+          }) }}
+      loop: "{{ (env_file_content.content | b64decode).split('\n') }}"
+      when: item | trim != '' and not item.startswith('#')
+      
+    - name: Export environment variables
+      ansible.builtin.set_fact:
+        ansible_env: "{{ ansible_env | default({}) | combine(env_vars) }}"
+        
+    - name: Set llama.cpp installation flag if requested
+      ansible.builtin.set_fact:
+        install_llama_cpp: "{{ install_llama_cpp }}"
+
+    - name: Show loaded variables
+      ansible.builtin.debug:
+        msg: "Loaded variables from {{ env_file }}. Will run {{ target_playbook }} {% if target_tags %}with tags: {{ target_tags }}{% endif %}"
+        verbosity: 1
+        
+    - name: Run target playbook
+      ansible.builtin.include_tasks: run-target-playbook.yml
+      vars:
+        playbook_to_run: "{{ target_playbook }}"
+        tags_to_use: "{{ target_tags }}"

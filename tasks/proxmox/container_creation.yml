@@ -1,0 +1,93 @@
+---
+# Container creation and validation tasks
+
+- name: Parse CT matrix
+  ansible.builtin.set_fact:
+    ct_matrix: "{{ proxmox_cts if proxmox_cts is not string else (proxmox_cts | from_json) }}"
+  tags: ['validate']
+
+- name: Sanity check node name isn't a realm
+  ansible.builtin.assert:
+    that:
+      - proxmox_node not in ['pam', 'pve@pam']
+    fail_msg: "PROXMOX_NODE must be the PVE node name (e.g. 'pve'), not a realm like 'pam'"
+  when: proxmox_node is defined
+  tags: ['validate']
+
+- name: Warn when Proxmox credentials are missing
+  ansible.builtin.debug:
+    msg: >-
+      No Proxmox API credentials detected. Export either token creds (PROXMOX_API_TOKEN_ID, PROXMOX_API_TOKEN_SECRET)
+      or password creds (PROXMOX_API_USER, PROXMOX_API_PASSWORD). API operations will be skipped.
+  when: not proxmox_credentials_present
+  tags: ['validate']
+
+- name: Validate required vars (runtime only)
+  ansible.builtin.assert:
+    that:
+      - proxmox_api_host is defined
+      - ct_matrix | length > 0
+      - proxmox_effective_user is defined
+      - (proxmox_use_token_auth or proxmox_use_password_auth)
+    fail_msg: "Missing required Proxmox credentials or empty CT matrix"
+  when: not ansible_check_mode and proxmox_credentials_present
+  tags: ['validate']
+
+- name: Validate static IPs in matrix
+  ansible.builtin.assert:
+    that:
+      - (item.ip | default('dhcp')) == 'dhcp' or (item.ip is match('^([0-9]{1,3}\\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$'))
+    fail_msg: "Bad static IP for {{ item.hostname }}: {{ item.ip }}"
+  loop: "{{ ct_matrix }}"
+  when: ct_matrix | length > 0
+  loop_control:
+    label: "{{ item.hostname }}"
+  tags: ['validate']
+
+- name: Show CT plan (check mode)
+  ansible.builtin.debug:
+    var: ct_matrix
+  when: ansible_check_mode
+  tags: ['plan']
+
+- name: Ensure LXC container(s) exist
+  community.general.proxmox:
+    node: "{{ proxmox_node }}"
+    vmid: "{{ (item.vmid | int) if (item.vmid | default(0))|int > 0 else omit }}"
+    hostname: "{{ item.hostname }}"
+    state: present
+    ostemplate: "{{ proxmox_ct_ostemplate }}"
+    # Resources
+    cores: "{{ item.cores | default(1) }}"
+    memory: "{{ item.memory | default(1024) }}"
+    swap: "{{ item.swap | default(ct_swap) }}"
+    disk: "{{ proxmox_storage }}:{{ (item.disk_gb | default(10)) | int }}"
+    # Net
+    netif:
+      net0: >-
+        name=eth0,{{ ((item.ip | default('dhcp')) == 'dhcp') | ternary('ip=dhcp', 'ip=' ~ (item.ip | string)) }}{{ (item.get('gw','') | string | length > 0) | ternary(',gw=' ~ item.get('gw',''), '') }},bridge={{ item.net_bridge | default('vmbr0') }}
+    # Security/features
+    unprivileged: "{{ item.unprivileged | default(ct_unprivileged) }}"
+    features: "{{ 'nesting=1' if (item.nesting | default(ct_nesting)) else omit }}"
+    # Root access
+    password: "{{ item.password | default(ct_password) | default(omit, true) }}"
+    pubkey: "{{ item.pubkey | default(ct_pubkey) | default(omit, true) }}"
+    onboot: "{{ item.onboot | default(true) }}"
+    timeout: 60
+  loop: "{{ ct_matrix }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  when: not ansible_check_mode and proxmox_credentials_present
+  tags: ['proxmox','create']
+
+- name: Start LXC container(s)
+  community.general.proxmox:
+    vmid: "{{ (item.vmid | int) if (item.vmid | default(0))|int > 0 else omit }}"
+    node: "{{ proxmox_node }}"
+    state: started
+    timeout: 60
+  loop: "{{ ct_matrix }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  when: not ansible_check_mode and proxmox_credentials_present 
+  tags: ['proxmox','start']
