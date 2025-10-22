@@ -1,0 +1,108 @@
+---
+- name: Setup facts for Docker image creation
+  setup:
+  tags: setup
+
+- name: Prepare docker tag from ref
+  set_fact:
+    clean_ref: "{{ (nethermind_repo_ref | default(ansible_date_time.iso8601_basic_short)) | regex_replace('refs/heads/', '') | regex_replace('[^a-zA-Z0-9._-]', '-') }}"
+  tags: prepare
+
+- name: Generate BASE_TAG
+  set_fact:
+    base_tag: "{{ github_actor[0:1] }}{{ 999999 | random(start=1000) }}"
+  tags: prepare
+
+- name: Display node information
+  debug:
+    msg: "Creating a node with NodeName='DevNode-{{ github_actor }}-{{ base_tag }}-{{ clean_ref }}-{{ network }}-{{ cl_client }}'"
+  tags: info
+
+- name: Extract dockerfile from additional_options
+  set_fact:
+    dockerfile_name: "{{ (additional_options | from_json).default_dockerfile | default('Dockerfile') }}"
+    build_config: "{{ (additional_options | from_json).default_dockerfile_build_type | default('release') | lower }}"
+  tags: extract_options
+
+- name: Check if should skip Docker build
+  set_fact:
+    skip_docker_build: >-
+      {{
+        (
+          clean_ref in ['master', 'paprika'] or 
+          clean_ref.startswith('release')
+        ) and
+        dockerfile_name == 'Dockerfile' and
+        build_config == 'release'
+      }}
+  tags: check_conditions
+
+- name: Display skip decision
+  debug:
+    msg: "Skip Docker build: {{ skip_docker_build }}"
+  tags: check_conditions
+
+- name: Trigger Docker Build Action
+  uri:
+    url: "{{ github_api_base }}/repos/{{ org_name }}/{{ source_repo_name }}/actions/workflows/publish-docker.yml/dispatches"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ github_token }}"
+      Accept: "application/vnd.github.v3+json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      ref: "{{ nethermind_repo_ref | default('main') }}"
+      inputs:
+        tag: "{{ clean_ref }}"
+        dockerfile: "{{ dockerfile_name }}"
+        build-config: "{{ build_config }}"
+    status_code: 204
+  when: not skip_docker_build
+  register: docker_build_trigger
+  tags: trigger_build
+
+- name: Wait for Docker Build Action to start
+  pause:
+    seconds: 10
+  when: not skip_docker_build
+  tags: wait_start
+
+- name: Wait for Docker Build Action to complete
+  uri:
+    url: "{{ github_api_base }}/repos/{{ org_name }}/{{ source_repo_name }}/actions/runs"
+    headers:
+      Authorization: "Bearer {{ github_token }}"
+      Accept: "application/vnd.github.v3+json"
+    method: GET
+  register: workflow_runs
+  until: >
+    workflow_runs.json.workflow_runs | 
+    selectattr('name', 'equalto', 'publish-docker.yml') |
+    selectattr('head_branch', 'equalto', (nethermind_repo_ref | default('main') | regex_replace('refs/heads/', ''))) |
+    list | length > 0 and
+    (workflow_runs.json.workflow_runs | 
+     selectattr('name', 'equalto', 'publish-docker.yml') |
+     selectattr('head_branch', 'equalto', (nethermind_repo_ref | default('main') | regex_replace('refs/heads/', ''))) |
+     list | first).status in ['completed']
+  retries: "{{ (max_wait_minutes * 60 / interval_seconds) | int }}"
+  delay: "{{ interval_seconds }}"
+  when: not skip_docker_build
+  tags: wait_completion
+
+- name: Check Docker build status
+  fail:
+    msg: "Docker build failed or timed out"
+  when: 
+    - not skip_docker_build
+    - workflow_runs is defined
+    - (workflow_runs.json.workflow_runs | 
+       selectattr('name', 'equalto', 'publish-docker.yml') |
+       selectattr('head_branch', 'equalto', (nethermind_repo_ref | default('main') | regex_replace('refs/heads/', ''))) |
+       list | first).conclusion != 'success'
+  tags: check_status
+
+- name: Docker image creation completed
+  debug:
+    msg: "Docker image creation phase completed. Base tag: {{ base_tag }}"
+  tags: completion 
